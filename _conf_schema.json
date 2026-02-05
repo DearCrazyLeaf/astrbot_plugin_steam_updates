@@ -1,0 +1,96 @@
+{
+  "enable_push": {
+    "description": "启用插件",
+    "type": "bool",
+    "default": true
+  },
+  "steam_web_api_key": {
+    "description": "Steam Web API Key",
+    "type": "string",
+    "default": "",
+    "hint": "可选，留空也可使用 Steam News API"
+  },
+  "steam_appids": {
+    "description": "AppID 列表",
+    "type": "list",
+    "default": [
+      "730"
+    ],
+    "hint": "支持多个 AppID，例如 730, 570",
+    "items": {
+      "type": "string"
+    }
+  },
+  "steam_lang": {
+    "description": "语言",
+    "type": "string",
+    "default": "schinese",
+    "hint": "例如 schinese / english / japanese"
+  },
+  "poll_interval_sec": {
+    "description": "轮询间隔(秒)",
+    "type": "int",
+    "default": 600
+  },
+  "notify_group_ids": {
+    "description": "推送群号列表",
+    "type": "list",
+    "default": [],
+    "hint": "仅列表内群会接收推送",
+    "items": {
+      "type": "string"
+    }
+  },
+  "platform_id": {
+    "description": "平台 ID（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "如 chatbot2，不填则需先发送 steam_update_ping 以捕获平台"
+  },
+  "message_mode": {
+    "description": "消息模式",
+    "type": "string",
+    "default": "card",
+    "options": [
+      "card",
+      "text"
+    ],
+    "hint": "card 为图片卡片，text 为文本"
+  },
+  "manual_query_command": {
+    "description": "手动查询指令（可配置多个）",
+    "type": "list",
+    "default": [
+      "STEAM更新"
+    ],
+    "hint": "群内发送任一指令可触发手动查询",
+    "items": {
+      "type": "string"
+    }
+  },
+  "max_items_per_app": {
+    "description": "每个游戏最多展示最近 N 天更新",
+    "type": "int",
+    "default": 1
+  },
+  "content_max_chars": {
+    "description": "正文最大字符数(单游戏)",
+    "type": "int",
+    "default": 800
+  },
+  "image_max_per_item": {
+    "description": "每条更新最多渲染图片数",
+    "type": "int",
+    "default": 10
+  },
+  "image_max_height": {
+    "description": "图片最大高度(px)",
+    "type": "int",
+    "default": 320
+  },
+  "debug_log": {
+    "description": "输出调试日志",
+    "type": "bool",
+    "default": false
+  }
+}
