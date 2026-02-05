@@ -1,6 +1,6 @@
 id: astrbot_plugin_steam_updates
-name: Steam Update Push
+name: Steam游戏更新推送插件
 version: v0.1.0
-author: HLYM
+author: DearCrazyLeaf
 description: 使用 Steam News API 轮询游戏更新并推送（支持多 AppID / 卡片或文本）
-repository: ""
+repository: "https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates"
