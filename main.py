@@ -68,6 +68,9 @@ class SteamUpdatePush(Star):
         self._stop_event = asyncio.Event()
         self._last_platform_name: str | None = None
         self._last_bot: Any | None = None
+        self._appid_name_map: dict[str, Any] | None = None
+        self._name_cache: dict[str, str] | None = None
+        self._name_cache_path = self._data_dir / "app_name_cache.json"
 
     # --- lifecycle ---
     async def initialize(self):
@@ -158,7 +161,7 @@ class SteamUpdatePush(Star):
             self._debug("no updates")
             return
 
-        sections = self._build_sections(appids, updates_by_app)
+        sections = await self._build_sections(appids, updates_by_app)
         latest_ts = max(
             (item.date for items in updates_by_app.values() for item in items if item.date),
             default=int(datetime.now().timestamp()),
@@ -183,10 +186,10 @@ class SteamUpdatePush(Star):
 
         self._save_state(state)
 
-    async def _manual_query(self):
+    async def _manual_query(self, umo: str | None = None):
         appids = self._normalize_appids(self._cfg("steam_appids", []))
         if not appids:
-            return None, "未配置 AppID，无法查询。"
+            return None, "未配置 AppID，无法查询"
 
         max_days = int(self._cfg("max_items_per_app", 1))
         max_days = max(1, max_days)
@@ -202,9 +205,9 @@ class SteamUpdatePush(Star):
         notice = ""
         if not updates_by_app:
             if max_days > 1:
-                notice = f"没有找到当天的更新信息，以下是最近 {max_days} 天的更新内容。"
+                notice = f"没有找到当天的更新信息，以下是最近 {max_days} 天的更新内容"
             else:
-                notice = "没有找到当天的更新信息，以下是最近一次的更新内容。"
+                notice = "没有找到当天的更新信息，以下是最近一次的更新内容"
             for appid in appids:
                 items = await self._fetch_news(appid, fetch_count, only_today=False)
                 if not items:
@@ -212,9 +215,9 @@ class SteamUpdatePush(Star):
                 updates_by_app[appid] = self._filter_recent_days(items, max_days)
 
         if not updates_by_app:
-            return None, "未获取到更新数据。"
+            return None, "未获取到更新数据"
 
-        sections = self._build_sections(appids, updates_by_app)
+        sections = await self._build_sections(appids, updates_by_app, umo)
         latest_ts = max(
             (item.date for items in updates_by_app.values() for item in items if item.date),
             default=int(datetime.now().timestamp()),
@@ -334,18 +337,310 @@ class SteamUpdatePush(Star):
             appids.append(val)
         return appids
 
+    def _appid_map_path(self) -> Path:
+        return Path(__file__).with_name("appid_map.json")
+
+    def _load_appid_name_map(self) -> dict[str, Any]:
+        if self._appid_name_map is not None:
+            return self._appid_name_map
+        path = self._appid_map_path()
+        if path.exists():
+            try:
+                self._appid_name_map = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(self._appid_name_map, dict):
+                    return self._appid_name_map
+            except Exception as exc:
+                self._debug(f"load appid map failed: {exc}")
+        self._appid_name_map = {}
+        return self._appid_name_map
+
+    def _save_appid_name_map(self) -> None:
+        if self._appid_name_map is None:
+            return
+        try:
+            path = self._appid_map_path()
+            path.write_text(
+                json.dumps(self._appid_name_map, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            self._debug(f"save appid map failed: {exc}")
+
+    def _load_name_cache(self) -> dict[str, str]:
+        if self._name_cache is not None:
+            return self._name_cache
+        if self._name_cache_path.exists():
+            try:
+                data = json.loads(self._name_cache_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._name_cache = {str(k): str(v) for k, v in data.items()}
+                    return self._name_cache
+            except Exception as exc:
+                self._debug(f"load name cache failed: {exc}")
+        self._name_cache = {}
+        return self._name_cache
+
+    def _save_name_cache(self) -> None:
+        if self._name_cache is None:
+            return
+        try:
+            self._name_cache_path.write_text(
+                json.dumps(self._name_cache, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            self._debug(f"save name cache failed: {exc}")
+
+    def _pick_name_from_map(self, value: Any, lang: str) -> str:
+        if not value:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in (lang, lang.lower(), lang.upper()):
+                if key in value:
+                    return str(value[key]).strip()
+            for key in ("default", "english", "en", "name"):
+                if key in value:
+                    return str(value[key]).strip()
+        return ""
+
+    async def _get_app_name(self, appid: str) -> str:
+        lang = str(self._cfg("steam_lang", "schinese")).strip().lower() or "schinese"
+        appid_map = self._load_appid_name_map()
+        mapped = self._pick_name_from_map(appid_map.get(str(appid)), lang)
+        if mapped:
+            return mapped
+
+        cache = self._load_name_cache()
+        cache_key = f"{appid}:{lang}"
+        if cache_key in cache:
+            return cache[cache_key]
+
+        if not self._client:
+            return f"AppID {appid}"
+
+        try:
+            resp = await self._client.get(
+                "https://store.steampowered.com/api/appdetails",
+                params={"appids": appid, "l": lang},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            entry = data.get(str(appid)) or data.get(int(appid)) or {}
+            if entry.get("success") and isinstance(entry.get("data"), dict):
+                name = str(entry["data"].get("name", "")).strip()
+                if name:
+                    cache[cache_key] = name
+                    self._save_name_cache()
+                    try:
+                        current = appid_map.get(str(appid))
+                        if isinstance(current, dict):
+                            current[str(lang)] = name
+                        elif current:
+                            current = {"default": str(current), str(lang): name}
+                        else:
+                            current = {str(lang): name}
+                        appid_map[str(appid)] = current
+                        self._save_appid_name_map()
+                    except Exception as exc:
+                        self._debug(f"update appid map failed: {exc}")
+                    return name
+        except Exception as exc:
+            self._debug(f"fetch app name failed ({appid}): {exc}")
+
+        return f"AppID {appid}"
+
+    async def _resolve_app_names(self, appids: list[str]) -> dict[str, str]:
+        if not appids:
+            return {}
+        tasks = [self._get_app_name(appid) for appid in appids]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        names: dict[str, str] = {}
+        for appid, name in zip(appids, results):
+            if isinstance(name, Exception):
+                names[appid] = f"AppID {appid}"
+            else:
+                names[appid] = str(name)
+        return names
+
+    # --- llm helpers ---
+    async def _resolve_llm_provider_id(self, umo: str | None) -> str | None:
+        provider_id = str(self._cfg("llm_provider_id", "")).strip()
+        if provider_id:
+            return provider_id
+        if umo:
+            try:
+                provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+                if provider_id:
+                    return str(provider_id)
+            except Exception as exc:
+                self._debug(f"get current chat provider failed: {exc}")
+        try:
+            providers = self.context.get_all_providers() or []
+        except Exception as exc:
+            self._debug(f"list providers failed: {exc}")
+            providers = []
+        for provider in providers:
+            try:
+                meta = provider.meta()
+                pid = getattr(meta, "id", None)
+                if pid:
+                    return str(pid)
+            except Exception:
+                continue
+        return None
+
+    def _list_llm_provider_ids(self) -> list[str]:
+        try:
+            providers = self.context.get_all_providers() or []
+        except Exception:
+            providers = []
+        ids: list[str] = []
+        for provider in providers:
+            try:
+                meta = provider.meta()
+                pid = getattr(meta, "id", None)
+                if pid:
+                    ids.append(str(pid))
+            except Exception:
+                continue
+        return ids
+
+    def _apply_prompt_template(self, template: str, mapping: dict[str, str]) -> str:
+        text = template or ""
+        for key, value in mapping.items():
+            text = text.replace("{" + key + "}", value)
+        return text
+
+    def _build_llm_input(self, app_name: str, appid: str, items: list[NewsItem]) -> str:
+        lines: list[str] = [f"游戏：{app_name}", f"AppID：{appid}", ""]
+        for item in items:
+            if item.title:
+                lines.append(f"标题：{item.title}")
+            if item.date:
+                lines.append(f"时间：{self._format_time(item.date)}")
+            content = self._format_news_text(item.contents)
+            if content:
+                lines.append(content)
+            if item.url:
+                lines.append(f"链接：{item.url}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    async def _call_llm(self, prompt: str, umo: str | None) -> str | None:
+        provider_id = await self._resolve_llm_provider_id(umo)
+        if not provider_id:
+            providers = self._list_llm_provider_ids()
+            if providers:
+                self._debug(f"llm provider not configured. available={providers}")
+            else:
+                self._debug("llm provider not configured.")
+            return None
+        max_chars = int(self._cfg("content_max_chars", 800))
+        max_tokens = min(2048, max(256, max_chars * 2))
+        try:
+            resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=0.2,
+            )
+        except Exception as exc:
+            self._debug(f"llm request failed: {exc}")
+            return None
+        text = ""
+        try:
+            if hasattr(resp, "completion_text"):
+                text = resp.completion_text or ""
+            else:
+                text = str(resp)
+        except Exception:
+            text = str(resp)
+        text = self._clean_llm_output(text)
+        return text.strip() if text else None
+
+    def _clean_llm_output(self, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = text.strip()
+        if "```" in cleaned:
+            cleaned = cleaned.replace("```", "")
+        return cleaned.strip()
+
     # --- message build ---
-    def _build_sections(
+    async def _build_sections_native(
         self,
         appids: list[str],
         updates_by_app: dict[str, list[NewsItem]],
     ) -> list[AppSection]:
+        names = await self._resolve_app_names(appids)
         sections: list[AppSection] = []
         for appid in appids:
             updates = updates_by_app.get(appid, [])
-            title = f"AppID {appid}"
+            title = names.get(appid) or f"AppID {appid}"
             sections.append(AppSection(appid=appid, title=title, updates=updates))
         return sections
+
+    async def _build_sections_llm(
+        self,
+        appids: list[str],
+        updates_by_app: dict[str, list[NewsItem]],
+        umo: str | None,
+    ) -> list[AppSection] | None:
+        names = await self._resolve_app_names(appids)
+        template = str(self._cfg("llm_prompt", "")).strip()
+        if not template:
+            self._debug("llm prompt empty, skip")
+            return None
+        max_chars = int(self._cfg("content_max_chars", 800))
+        sections: list[AppSection] = []
+        for appid in appids:
+            items = updates_by_app.get(appid, [])
+            title = names.get(appid) or f"AppID {appid}"
+            if not items:
+                sections.append(AppSection(appid=appid, title=title, updates=[]))
+                continue
+            raw_input = self._build_llm_input(title, appid, items)
+            prompt = self._apply_prompt_template(
+                template,
+                {
+                    "appid": appid,
+                    "app_name": title,
+                    "lang": str(self._cfg("steam_lang", "schinese")),
+                    "max_chars": str(max_chars),
+                    "content": raw_input,
+                },
+            )
+            llm_text = await self._call_llm(prompt, umo)
+            if not llm_text:
+                sections.append(AppSection(appid=appid, title=title, updates=items))
+                continue
+            latest_ts = max((it.date for it in items if it.date), default=items[0].date)
+            merged = NewsItem(
+                gid=items[0].gid,
+                title=items[0].title or "更新内容",
+                url=items[0].url,
+                contents=llm_text,
+                date=latest_ts,
+            )
+            sections.append(AppSection(appid=appid, title=title, updates=[merged]))
+        return sections
+
+    async def _build_sections(
+        self,
+        appids: list[str],
+        updates_by_app: dict[str, list[NewsItem]],
+        umo: str | None = None,
+    ) -> list[AppSection]:
+        mode = str(self._cfg("content_process_mode", "plugin")).lower().strip()
+        if mode == "llm":
+            sections = await self._build_sections_llm(appids, updates_by_app, umo)
+            if sections is not None:
+                return sections
+            self._debug("llm failed, fallback to plugin mode")
+        return await self._build_sections_native(appids, updates_by_app)
 
     def _build_text_message(
         self, sections: list[AppSection], publish_text: str, notice: str = ""
@@ -358,7 +653,7 @@ class SteamUpdatePush(Star):
         lines.append("")
         max_chars = int(self._cfg("content_max_chars", 800))
         for sec in sections:
-            lines.append(f"[{sec.title}]")
+            lines.append(f"【{sec.title}】")
             if not sec.updates:
                 lines.append("暂无更新")
                 lines.append("")
@@ -410,6 +705,8 @@ class SteamUpdatePush(Star):
         title_font = self._load_font(30, bold=True)
         header_font = self._load_font(18, bold=True)
         body_font = self._load_font(18, bold=False)
+        section_title_size = max(12, int(getattr(title_font, "size", 30) * 0.95))
+        section_title_font = self._load_font(section_title_size, bold=True)
         small_font = self._load_font(14, bold=False)
 
         blocks = self._build_card_blocks(
@@ -419,6 +716,7 @@ class SteamUpdatePush(Star):
             title_font,
             header_font,
             body_font,
+            section_title_font,
             small_font,
             image_map,
             max_text_width,
@@ -446,11 +744,11 @@ class SteamUpdatePush(Star):
 
         steam_font = self._load_font(30, bold=True)
         left_x = padding
-        steam_text = "STEAM 更新推送"
+        steam_text = "STEAM 游戏更新推送"
         draw.text((left_x, icon_y - 24), steam_text, font=steam_font, fill=title_color)
 
-        header_cn = "STEAM UPDATE PUSH"
-        draw.text((left_x, icon_y + 12), header_cn, font=small_font, fill=muted)
+        header_cn = "STEAM GAME UPDATE PUSH"
+        draw.text((left_x, icon_y + 16), header_cn, font=small_font, fill=muted)
 
         right_label = "更新日志"
         right_sub = "UPDATE LOG"
@@ -489,7 +787,7 @@ class SteamUpdatePush(Star):
         text_y = footer_y + 16
         draw.text((footer_x, text_y), f"查询时间：{query_text}", font=small_font, fill=title_color)
         text_y += (small_font.getbbox("Mg")[3] if small_font else 0) + 6
-        draw.text((footer_x, text_y), "Powered by Steam News API", font=small_font, fill=accent)
+        draw.text((footer_x, text_y), "Powered by Steam News API, AstrBot", font=small_font, fill=accent)
 
         buf = BytesIO()
         img.save(buf, format="PNG")
@@ -503,6 +801,7 @@ class SteamUpdatePush(Star):
         title_font: ImageFont.FreeTypeFont,
         header_font: ImageFont.FreeTypeFont,
         body_font: ImageFont.FreeTypeFont,
+        section_title_font: ImageFont.FreeTypeFont,
         small_font: ImageFont.FreeTypeFont,
         image_map: dict[str, PilImage.Image],
         image_max_width: int,
@@ -532,7 +831,7 @@ class SteamUpdatePush(Star):
         max_imgs = int(self._cfg("image_max_per_item", 1))
         max_img_h = int(self._cfg("image_max_height", 320))
         for sec in sections:
-            blocks.append(RenderBlock("text", f"【{sec.title}】", body_font, accent, 14))
+            blocks.append(RenderBlock("text", f"【{sec.title}】", section_title_font, accent, 14))
             if not sec.updates:
                 blocks.append(RenderBlock("text", "暂无更新", body_font, muted, 16))
                 header_img = header_map.get(sec.appid)
@@ -555,6 +854,7 @@ class SteamUpdatePush(Star):
                         blocks.append(RenderBlock("image", image=img, gap=10))
                 date_text = self._format_time(item.date)
                 if date_text:
+                    blocks.append(RenderBlock("text", "", small_font, muted, 4))
                     blocks.append(RenderBlock("text", f"发布于：{date_text}", small_font, muted, 10))
                 if item.url:
                     blocks.append(RenderBlock("text", f"{item.url}", small_font, muted, 14))
@@ -623,8 +923,10 @@ class SteamUpdatePush(Star):
     def _summarize_text(self, text: str, max_chars: int) -> str:
         if not text:
             return ""
+        if str(self._cfg("content_process_mode", "plugin")).lower().strip() == "llm":
+            return text.strip()
         clean = self._format_news_text(text)
-        clean = re.sub(r"\s+", " ", clean).strip()
+        clean = re.sub(r"[ \t]+", " ", clean).strip()
         if len(clean) > max_chars:
             clean = clean[: max_chars - 1] + "…"
         return clean
@@ -796,6 +1098,17 @@ class SteamUpdatePush(Star):
                         return ImageFont.truetype(str(candidate), size)
                     except Exception:
                         pass
+            else:
+                normal_fonts = [
+                    p
+                    for p in fonts
+                    if not any(k in p.stem.lower() for k in ("bold", "black", "heavy", "bd"))
+                ]
+                for candidate in normal_fonts:
+                    try:
+                        return ImageFont.truetype(str(candidate), size)
+                    except Exception:
+                        pass
             for candidate in fonts:
                 try:
                     return ImageFont.truetype(str(candidate), size)
@@ -897,13 +1210,85 @@ class SteamUpdatePush(Star):
                 return None
         return f"{platform_id}:GroupMessage:{group_id}"
 
+    def _save_temp_image(self, image_bytes: bytes) -> str | None:
+        if not image_bytes:
+            return None
+        temp_dir = self._data_dir / "temp"
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            path = temp_dir / f"manual_{ts}.png"
+            path.write_bytes(image_bytes)
+            self._trim_temp_dir(temp_dir, keep=10)
+            return str(path)
+        except Exception as exc:
+            self._debug(f"save temp image failed: {exc}")
+            return None
+
+    def _trim_temp_dir(self, temp_dir: Path, keep: int = 10) -> None:
+        try:
+            files = [p for p in temp_dir.iterdir() if p.is_file()]
+        except Exception:
+            return
+        if len(files) <= keep:
+            return
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in files[keep:]:
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
+    def _get_event_text(self, event: AstrMessageEvent) -> str:
+        text = (event.message_str or "").strip()
+        if text:
+            return text
+        # fallback to adapter helpers if available
+        for attr in ("get_message_plain_text", "get_plain_text", "get_message_text"):
+            fn = getattr(event, attr, None)
+            if callable(fn):
+                try:
+                    text = str(fn()).strip()
+                    if text:
+                        return text
+                except Exception:
+                    pass
+        # fallback to message chain
+        msg = getattr(event, "message", None)
+        if msg is None:
+            msg = getattr(event, "message_chain", None)
+        chain = getattr(msg, "chain", None) if msg is not None else None
+        parts: list[str] = []
+        try:
+            if isinstance(chain, list):
+                for comp in chain:
+                    if isinstance(comp, Plain):
+                        parts.append(comp.text or "")
+            elif isinstance(msg, MessageChain):
+                for comp in msg.chain:
+                    if isinstance(comp, Plain):
+                        parts.append(comp.text or "")
+        except Exception:
+            pass
+        text = "".join(parts).strip()
+        return text
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def steam_updates_on_group_message(self, event: AstrMessageEvent):
         commands = self._manual_query_commands()
-        text = (event.message_str or "").strip()
-        if text.startswith(("/", "／")):
+        text = self._get_event_text(event)
+        if text.startswith(("/", "\uFF0F")):
             text = text[1:].strip()
-        if not commands or text not in commands:
+        if not text:
+            return
+        if commands:
+            if text in commands:
+                pass
+            elif text.casefold() in {c.casefold() for c in commands}:
+                pass
+            else:
+                return
+        else:
             return
 
         try:
@@ -911,31 +1296,35 @@ class SteamUpdatePush(Star):
         except Exception:
             group_id = ""
         if not group_id:
-            yield event.plain_result("请在群聊中使用该指令。")
+            yield event.plain_result("请在群聊中使用该指令")
             return
 
         if not bool(self._cfg("enable_push", True)):
-            yield event.plain_result("插件未启用。")
+            yield event.plain_result("插件未启用")
             return
 
         allowed = [str(x).strip() for x in self._cfg("notify_group_ids", []) or []]
         allowed = [g for g in allowed if g]
         if not allowed:
-            yield event.plain_result("未配置生效群，手动查询已禁用。")
+            yield event.plain_result("未配置生效群，手动查询已禁用")
             return
         if group_id not in allowed:
-            yield event.plain_result("当前群未启用插件。")
+            yield event.plain_result("当前群未启用插件")
             return
 
         yield event.plain_result("正在查询更新，请稍后...")
-        result, err = await self._manual_query()
+        result, err = await self._manual_query(event.unified_msg_origin)
         if err:
             yield event.plain_result(err)
             return
         if isinstance(result, bytes):
-            yield event.image_result(result)
+            path = self._save_temp_image(result)
+            if path:
+                yield event.image_result(path)
+            else:
+                yield event.plain_result("图片生成失败，请稍后重试")
         else:
-            yield event.plain_result(result or "暂无更新。")
+            yield event.plain_result(result or "暂无更新")
 
 
 
