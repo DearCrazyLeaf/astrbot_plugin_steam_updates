@@ -27,6 +27,8 @@
 - **卡片/文本**：两种输出模式可选
 - **无更新静默**：当天无更新不推送
 
+<img width="900" height="1184" alt="preview" src="https://github.com/user-attachments/assets/59a296a5-23f8-428f-9a32-72e38f64289c" />
+
 ---
 
 ## 📦 安装 | Installation
