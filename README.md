@@ -65,7 +65,7 @@ AstrBot WebUI -> 插件 -> 插件配置
 | content_process_mode | 内容处理方式：`plugin` / `llm` |
 | llm_provider_id | LLM 提供商ID（可选） |
 | llm_prompt | LLM 提示词（仅 llm 模式生效） |
-| max_items_per_app | 每个游戏最多展示最近 N 天更新 |
+| max_days | 每个游戏最多展示最近 N 天更新 |
 | content_max_chars | 单游戏正文最大字符数 |
 | image_max_per_item | 每条更新最多渲染图片数 |
 | image_max_height | 图片最大高度 |

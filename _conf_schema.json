@@ -90,7 +90,7 @@
     "default": "你是Steam游戏更新日志整理助手。请根据输入内容使用 {lang} 语言输出整理结果：\n- 保留结构与条目\n- 使用 [分类] 作为小节标题\n- 去除无意义符号与重复\n- 只输出更新内容\n- 不要输出Markdown代码块，不要带句号\n- 不要输出游戏信息和更新时间以及发布链接\n- 输出长度不超过 {max_chars} 字\n- 保持静默思考，不要把你的转化内容发送出来，避免被当作聊天回复处理\n\n【输入】\n{content}",
     "hint": "支持变量：{app_name} {appid} {lang} {max_chars} {content}"
   },
-  "max_items_per_app": {
+  "max_days": {
     "description": "每个游戏最多展示最近 N 天更新",
     "type": "int",
     "default": 1

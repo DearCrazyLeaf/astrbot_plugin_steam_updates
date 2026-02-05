@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,14 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 
 PLUGIN_ID = "astrbot_plugin_steam_updates"
 STEAM_NEWS_API = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/"
+STEAM_IMAGE_DOMAINS = {
+    "steamcommunity.com",
+    "steampowered.com",
+    "steamstatic.com",
+    "akamaihd.net",
+}
+MAX_NEWS_IMAGE_BYTES = 4_000_000
+MAX_NEWS_IMAGE_PIXELS = 3_500_000
 
 
 @dataclass
@@ -95,6 +104,37 @@ class SteamUpdatePush(Star):
         if self._cfg("debug_log", False):
             logger.info("[steam_updates] " + msg)
 
+    def _get_max_days(self) -> int:
+        raw = self._cfg("max_days", 1)
+        try:
+            value = int(raw)
+        except Exception:
+            value = 1
+        return max(1, value)
+
+    @staticmethod
+    def _font_height(font: ImageFont.FreeTypeFont | None, sample: str = "测") -> int:
+        if not font:
+            return 0
+        x0, y0, x1, y1 = font.getbbox(sample)
+        return max(0, y1 - y0)
+
+    @staticmethod
+    def _is_allowed_image_url(url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        for domain in STEAM_IMAGE_DOMAINS:
+            if host == domain or host.endswith("." + domain):
+                return True
+        return False
+
     # --- state ---
     def _load_state(self) -> dict[str, str]:
         if not self._state_path.exists():
@@ -121,7 +161,7 @@ class SteamUpdatePush(Star):
             try:
                 await self._poll_once()
             except Exception as exc:
-                logger.error("[steam_updates] poll failed: %s", exc)
+                logger.exception("[steam_updates] poll failed")
             interval = int(self._cfg("poll_interval_sec", 600))
             interval = max(30, interval)
             try:
@@ -143,8 +183,7 @@ class SteamUpdatePush(Star):
             return
 
         state = self._load_state()
-        max_days = int(self._cfg("max_items_per_app", 1))
-        max_days = max(1, max_days)
+        max_days = self._get_max_days()
         # Ensure enough items to cover all updates of today (Steam API has an upper bound).
         fetch_count = max(max_days, 50)
         updates_by_app: dict[str, list[NewsItem]] = {}
@@ -155,7 +194,7 @@ class SteamUpdatePush(Star):
             latest_gid = items[0].gid
             if state.get(appid) == latest_gid:
                 continue
-            updates_by_app[appid] = items
+            updates_by_app[appid] = self._filter_recent_days(items, max_days)
 
         if not updates_by_app:
             self._debug("no updates")
@@ -191,8 +230,7 @@ class SteamUpdatePush(Star):
         if not appids:
             return None, "未配置 AppID，无法查询"
 
-        max_days = int(self._cfg("max_items_per_app", 1))
-        max_days = max(1, max_days)
+        max_days = self._get_max_days()
         fetch_count = max(max_days, 50)
 
         updates_by_app: dict[str, list[NewsItem]] = {}
@@ -304,8 +342,8 @@ class SteamUpdatePush(Star):
     def _filter_today_items(self, items: list[NewsItem]) -> list[NewsItem]:
         if not items:
             return []
-        now = datetime.now()
-        start_of_day = datetime(now.year, now.month, now.day)
+        now = datetime.now().astimezone()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
         start_ts = int(start_of_day.timestamp())
         return [item for item in items if item.date >= start_ts]
 
@@ -313,20 +351,25 @@ class SteamUpdatePush(Star):
         if not items:
             return []
         max_days = max(1, max_days)
+        tz = datetime.now().astimezone().tzinfo
         items_sorted = sorted(items, key=lambda x: x.date, reverse=True)
         day_keys: list[tuple[int, int, int]] = []
         keep_days: set[tuple[int, int, int]] = set()
         for item in items_sorted:
-            dt = datetime.fromtimestamp(item.date)
+            dt = datetime.fromtimestamp(item.date, tz)
             key = (dt.year, dt.month, dt.day)
             if key not in keep_days:
                 day_keys.append(key)
                 keep_days.add(key)
                 if len(day_keys) >= max_days:
                     break
-        return [item for item in items_sorted if (datetime.fromtimestamp(item.date).year,
-                                                  datetime.fromtimestamp(item.date).month,
-                                                  datetime.fromtimestamp(item.date).day) in keep_days]
+        return [
+            item
+            for item in items_sorted
+            if (datetime.fromtimestamp(item.date, tz).year,
+                datetime.fromtimestamp(item.date, tz).month,
+                datetime.fromtimestamp(item.date, tz).day) in keep_days
+        ]
 
     def _normalize_appids(self, raw_list: Any) -> list[str]:
         appids: list[str] = []
@@ -689,6 +732,99 @@ class SteamUpdatePush(Star):
             ),
         )
 
+    def _draw_card_header(
+        self,
+        draw: ImageDraw.ImageDraw,
+        width: int,
+        header_h: int,
+        padding: int,
+        header_font: ImageFont.FreeTypeFont,
+        small_font: ImageFont.FreeTypeFont,
+        title_color: tuple[int, int, int],
+        muted: tuple[int, int, int],
+        accent: tuple[int, int, int],
+    ) -> tuple[int, int, int]:
+        header_bg = (32, 36, 41)
+        divider = (58, 66, 78)
+        draw.rectangle([0, 0, width, header_h], fill=header_bg)
+        draw.line([(0, header_h), (width, header_h)], fill=divider, width=1)
+
+        icon_y = header_h // 2
+        steam_font = self._load_font(30, bold=True)
+        left_x = padding
+        steam_text = "STEAM 游戏更新推送"
+        draw.text((left_x, icon_y - 24), steam_text, font=steam_font, fill=title_color)
+
+        header_cn = "STEAM GAME UPDATE PUSH"
+        draw.text((left_x, icon_y + 16), header_cn, font=small_font, fill=muted)
+
+        right_label = "更新日志"
+        right_sub = "UPDATE LOG"
+        right_w = draw.textlength(right_label, font=header_font)
+        right_sub_w = draw.textlength(right_sub, font=small_font)
+        draw.text(
+            (width - padding - right_w, icon_y - 22),
+            right_label,
+            font=header_font,
+            fill=accent,
+        )
+        draw.text(
+            (width - padding - right_sub_w, icon_y + 10),
+            right_sub,
+            font=small_font,
+            fill=muted,
+        )
+        return header_bg
+
+    def _draw_card_footer(
+        self,
+        draw: ImageDraw.ImageDraw,
+        width: int,
+        total_height: int,
+        footer_h: int,
+        padding: int,
+        header_bg: tuple[int, int, int],
+        title_color: tuple[int, int, int],
+        accent: tuple[int, int, int],
+        small_font: ImageFont.FreeTypeFont,
+        query_text: str,
+    ) -> None:
+        footer_y = total_height - footer_h
+        draw.rectangle([0, footer_y, width, total_height], fill=header_bg)
+        footer_x = max(0, padding - 18)
+        text_y = footer_y + 16
+        draw.text((footer_x, text_y), f"查询时间：{query_text}", font=small_font, fill=title_color)
+        text_y += self._font_height(small_font, "Mg") + 6
+        draw.text((footer_x, text_y), "Powered by Steam News API, AstrBot", font=small_font, fill=accent)
+
+    def _draw_blocks(
+        self,
+        img: PilImage.Image,
+        draw: ImageDraw.ImageDraw,
+        blocks: list[RenderBlock],
+        width: int,
+        padding: int,
+        start_y: int,
+    ) -> int:
+        y = start_y
+        for block in blocks:
+            if block.kind == "text":
+                if block.text:
+                    draw.text((padding, y), block.text, font=block.font, fill=block.color)
+                y += self._font_height(block.font) + block.gap
+            elif block.kind == "image":
+                if block.image:
+                    img.paste(
+                        block.image,
+                        (padding, y),
+                        block.image if block.image.mode == "RGBA" else None,
+                    )
+                    y += block.image.height + block.gap
+            else:
+                draw.line([(0, y), (width, y)], fill=block.color, width=1)
+                y += 1 + block.gap
+        return y
+
     def _render_card_sync(
         self,
         sections: list[AppSection],
@@ -731,63 +867,35 @@ class SteamUpdatePush(Star):
         draw = ImageDraw.Draw(img)
         self._draw_gradient(draw, width, total_height)
 
-        # header bar
-        header_bg = (32, 36, 41)
-        divider = (58, 66, 78)
-        draw.rectangle([0, 0, width, header_h], fill=header_bg)
-        draw.line([(0, header_h), (width, header_h)], fill=divider, width=1)
-
-        icon_y = header_h // 2
         title_color = (199, 213, 224)
         muted = (143, 152, 160)
         accent = (102, 192, 244)
-
-        steam_font = self._load_font(30, bold=True)
-        left_x = padding
-        steam_text = "STEAM 游戏更新推送"
-        draw.text((left_x, icon_y - 24), steam_text, font=steam_font, fill=title_color)
-
-        header_cn = "STEAM GAME UPDATE PUSH"
-        draw.text((left_x, icon_y + 16), header_cn, font=small_font, fill=muted)
-
-        right_label = "更新日志"
-        right_sub = "UPDATE LOG"
-        right_w = draw.textlength(right_label, font=header_font)
-        right_sub_w = draw.textlength(right_sub, font=small_font)
-        draw.text(
-            (width - padding - right_w, icon_y - 22),
-            right_label,
-            font=header_font,
-            fill=accent,
-        )
-        draw.text(
-            (width - padding - right_sub_w, icon_y + 10),
-            right_sub,
-            font=small_font,
-            fill=muted,
+        header_bg = self._draw_card_header(
+            draw,
+            width,
+            header_h,
+            padding,
+            header_font,
+            small_font,
+            title_color,
+            muted,
+            accent,
         )
 
         y = header_h + 28
-        for block in blocks:
-            if block.kind == "text":
-                if block.text:
-                    draw.text((padding, y), block.text, font=block.font, fill=block.color)
-                y += (block.font.getbbox("测")[3] if block.font else 0) + block.gap
-            elif block.kind == "image":
-                if block.image:
-                    img.paste(block.image, (padding, y), block.image if block.image.mode == "RGBA" else None)
-                    y += block.image.height + block.gap
-            else:
-                draw.line([(0, y), (width, y)], fill=block.color, width=1)
-                y += 1 + block.gap
-
-        footer_y = total_height - footer_h
-        draw.rectangle([0, footer_y, width, total_height], fill=header_bg)
-        footer_x = max(0, padding - 18)
-        text_y = footer_y + 16
-        draw.text((footer_x, text_y), f"查询时间：{query_text}", font=small_font, fill=title_color)
-        text_y += (small_font.getbbox("Mg")[3] if small_font else 0) + 6
-        draw.text((footer_x, text_y), "Powered by Steam News API, AstrBot", font=small_font, fill=accent)
+        self._draw_blocks(img, draw, blocks, width, padding, y)
+        self._draw_card_footer(
+            draw,
+            width,
+            total_height,
+            footer_h,
+            padding,
+            header_bg,
+            title_color,
+            accent,
+            small_font,
+            query_text,
+        )
 
         buf = BytesIO()
         img.save(buf, format="PNG")
@@ -831,39 +939,76 @@ class SteamUpdatePush(Star):
         max_imgs = int(self._cfg("image_max_per_item", 1))
         max_img_h = int(self._cfg("image_max_height", 320))
         for sec in sections:
-            blocks.append(RenderBlock("text", f"【{sec.title}】", section_title_font, accent, 14))
-            if not sec.updates:
-                blocks.append(RenderBlock("text", "暂无更新", body_font, muted, 16))
-                header_img = header_map.get(sec.appid)
-                if header_img:
-                    header_img = self._scale_image(header_img, image_max_width, int(self._cfg("image_max_height", 320)))
-                    blocks.append(RenderBlock("image", image=header_img, gap=14))
-                continue
-            for item in sec.updates:
-                blocks.extend(self._wrap_blocks(f"• {item.title}", body_font, body_color, max_text_width))
-                summary = self._summarize_text(item.contents, max_chars)
-                if summary:
-                    blocks.extend(self._wrap_blocks(summary, body_font, body_color, max_text_width))
+            blocks.extend(
+                self._build_section_blocks(
+                    sec,
+                    max_text_width,
+                    section_title_font,
+                    body_font,
+                    body_color,
+                    small_font,
+                    muted,
+                    accent,
+                    image_map,
+                    image_max_width,
+                    max_img_h,
+                    max_chars,
+                    max_imgs,
+                    header_map,
+                )
+            )
 
-                # images (first N)
-                image_urls = self._extract_image_urls(item.contents)[: max(0, max_imgs)]
-                for url in image_urls:
-                    img = image_map.get(url)
-                    if img:
-                        img = self._scale_image(img, image_max_width, max_img_h)
-                        blocks.append(RenderBlock("image", image=img, gap=10))
-                date_text = self._format_time(item.date)
-                if date_text:
-                    blocks.append(RenderBlock("text", "", small_font, muted, 4))
-                    blocks.append(RenderBlock("text", f"发布于：{date_text}", small_font, muted, 10))
-                if item.url:
-                    blocks.append(RenderBlock("text", f"{item.url}", small_font, muted, 14))
+        return blocks
+
+    def _build_section_blocks(
+        self,
+        sec: AppSection,
+        max_text_width: int,
+        section_title_font: ImageFont.FreeTypeFont,
+        body_font: ImageFont.FreeTypeFont,
+        body_color: tuple[int, int, int],
+        small_font: ImageFont.FreeTypeFont,
+        muted: tuple[int, int, int],
+        accent: tuple[int, int, int],
+        image_map: dict[str, PilImage.Image],
+        image_max_width: int,
+        max_img_h: int,
+        max_chars: int,
+        max_imgs: int,
+        header_map: dict[str, PilImage.Image],
+    ) -> list[RenderBlock]:
+        blocks: list[RenderBlock] = []
+        blocks.append(RenderBlock("text", f"【{sec.title}】", section_title_font, accent, 14))
+        if not sec.updates:
+            blocks.append(RenderBlock("text", "暂无更新", body_font, muted, 16))
             header_img = header_map.get(sec.appid)
             if header_img:
-                header_img = self._scale_image(header_img, image_max_width, int(self._cfg("image_max_height", 320)))
+                header_img = self._scale_image(header_img, image_max_width, max_img_h)
                 blocks.append(RenderBlock("image", image=header_img, gap=14))
-            blocks.append(RenderBlock("text", "", body_font, body_color, 8))
+            return blocks
+        for item in sec.updates:
+            blocks.extend(self._wrap_blocks(f"• {item.title}", body_font, body_color, max_text_width))
+            summary = self._summarize_text(item.contents, max_chars)
+            if summary:
+                blocks.extend(self._wrap_blocks(summary, body_font, body_color, max_text_width))
 
+            image_urls = self._extract_image_urls(item.contents)[: max(0, max_imgs)]
+            for url in image_urls:
+                img = image_map.get(url)
+                if img:
+                    img = self._scale_image(img, image_max_width, max_img_h)
+                    blocks.append(RenderBlock("image", image=img, gap=10))
+            date_text = self._format_time(item.date)
+            if date_text:
+                blocks.append(RenderBlock("text", "", small_font, muted, 4))
+                blocks.append(RenderBlock("text", f"发布于：{date_text}", small_font, muted, 10))
+            if item.url:
+                blocks.append(RenderBlock("text", f"{item.url}", small_font, muted, 14))
+        header_img = header_map.get(sec.appid)
+        if header_img:
+            header_img = self._scale_image(header_img, image_max_width, max_img_h)
+            blocks.append(RenderBlock("image", image=header_img, gap=14))
+        blocks.append(RenderBlock("text", "", body_font, body_color, 8))
         return blocks
 
     def _wrap_blocks(
@@ -901,7 +1046,7 @@ class SteamUpdatePush(Star):
         height = padding
         for block in blocks:
             if block.kind == "text":
-                height += (block.font.getbbox("测")[3] if block.font else 0) + block.gap
+                height += self._font_height(block.font) + block.gap
             elif block.kind == "image":
                 height += (block.image.height if block.image else 0) + block.gap
             else:
@@ -924,11 +1069,14 @@ class SteamUpdatePush(Star):
         if not text:
             return ""
         if str(self._cfg("content_process_mode", "plugin")).lower().strip() == "llm":
-            return text.strip()
+            clean = text.strip()
+            if len(clean) > max_chars:
+                clean = clean[: max_chars - 3].rstrip() + "..."
+            return clean
         clean = self._format_news_text(text)
-        clean = re.sub(r"[ \t]+", " ", clean).strip()
+        clean = re.sub(r"[ 	]+", " ", clean).strip()
         if len(clean) > max_chars:
-            clean = clean[: max_chars - 1] + "…"
+            clean = clean[: max_chars - 3].rstrip() + "..."
         return clean
 
 
@@ -962,8 +1110,42 @@ class SteamUpdatePush(Star):
     def _extract_image_urls(self, text: str) -> list[str]:
         if not text:
             return []
-        urls = re.findall(r"https?://\\S+\\.(?:png|jpg|jpeg|webp|gif)", text, flags=re.I)
+        urls = re.findall(r"https?://\S+\.(?:png|jpg|jpeg|webp|gif)", text, flags=re.I)
         return [u.rstrip(")") for u in urls]
+
+    async def _download_image(self, url: str) -> PilImage.Image | None:
+        if not self._client:
+            return None
+        if not self._is_allowed_image_url(url):
+            self._debug(f"skip untrusted image url: {url}")
+            return None
+        try:
+            async with self._client.stream(
+                "GET", url, timeout=10, follow_redirects=False
+            ) as resp:
+                resp.raise_for_status()
+                content_type = (resp.headers.get("content-type") or "").lower()
+                if content_type and not content_type.startswith("image/"):
+                    self._debug(f"skip non-image content: {url} {content_type}")
+                    return None
+                data = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > MAX_NEWS_IMAGE_BYTES:
+                        self._debug(f"image too large: {url}")
+                        return None
+            if not data:
+                return None
+            img = PilImage.open(BytesIO(data))
+            if img.width * img.height > MAX_NEWS_IMAGE_PIXELS:
+                self._debug(f"image too large (pixels): {url}")
+                return None
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            return img
+        except Exception as exc:
+            self._debug(f"image download failed: {url} {exc}")
+            return None
 
     async def _prefetch_images(self, sections: list[AppSection]) -> dict[str, PilImage.Image]:
         if not self._client:
@@ -984,16 +1166,9 @@ class SteamUpdatePush(Star):
 
         async def _fetch(url: str):
             async with semaphore:
-                try:
-                    resp = await self._client.get(url, timeout=10)
-                    resp.raise_for_status()
-                    data = resp.content
-                    img = PilImage.open(BytesIO(data))
-                    if img.mode not in ("RGB", "RGBA"):
-                        img = img.convert("RGB")
+                img = await self._download_image(url)
+                if img:
                     results[url] = img
-                except Exception as exc:
-                    self._debug(f"image download failed: {url} {exc}")
 
         await asyncio.gather(*[_fetch(u) for u in urls])
         return results
@@ -1188,13 +1363,12 @@ class SteamUpdatePush(Star):
                 self._debug(f"send_message failed: {exc}")
 
         # fallback: aiocqhttp bot
-        if self._last_bot and isinstance(self._last_bot, object):
+        if self._last_bot and hasattr(self._last_bot, "send_group_msg"):
             try:
-                if hasattr(self._last_bot, "send_group_msg"):
-                    await self._last_bot.send_group_msg(
-                        group_id=int(group_id), message=chain.chain
-                    )
-                    return True
+                await self._last_bot.send_group_msg(
+                    group_id=int(group_id), message=chain.chain
+                )
+                return True
             except Exception as exc:
                 self._debug(f"bot send_group_msg failed: {exc}")
         return False
