@@ -1,10 +1,11 @@
 import asyncio
 import json
+import math
 import os
 import re
 from urllib.parse import urlparse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +136,32 @@ class SteamUpdatePush(Star):
                 return True
         return False
 
+    def _get_poll_start_time(self) -> tuple[int, int]:
+        raw = str(self._cfg("poll_start_time", "00:00")).strip()
+        match = re.match(r"^(\d{1,2}):(\d{1,2})$", raw)
+        if not match:
+            return 0, 0
+        hour = max(0, min(23, int(match.group(1))))
+        minute = max(0, min(59, int(match.group(2))))
+        return hour, minute
+
+    def _get_poll_interval_sec(self) -> int:
+        try:
+            interval = int(self._cfg("poll_interval_sec", 600))
+        except Exception:
+            interval = 600
+        return max(30, interval)
+
+    def _next_poll_time(self, now: datetime) -> datetime:
+        hour, minute = self._get_poll_start_time()
+        start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now <= start:
+            return start
+        interval = self._get_poll_interval_sec()
+        elapsed = (now - start).total_seconds()
+        k = math.ceil(elapsed / interval)
+        return start + timedelta(seconds=k * interval)
+
     # --- state ---
     def _load_state(self) -> dict[str, str]:
         if not self._state_path.exists():
@@ -156,18 +183,22 @@ class SteamUpdatePush(Star):
 
     # --- polling ---
     async def _poll_loop(self):
-        await asyncio.sleep(3)
         while not self._stop_event.is_set():
+            now = datetime.now().astimezone()
+            next_run = self._next_poll_time(now)
+            wait_sec = max(0, (next_run - now).total_seconds())
+            if self._cfg("debug_log", False):
+                self._debug(f"next poll at {next_run.isoformat()}")
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=wait_sec)
+                if self._stop_event.is_set():
+                    break
+            except asyncio.TimeoutError:
+                pass
             try:
                 await self._poll_once()
             except Exception as exc:
                 logger.exception("[steam_updates] poll failed")
-            interval = int(self._cfg("poll_interval_sec", 600))
-            interval = max(30, interval)
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
-            except asyncio.TimeoutError:
-                pass
 
     async def _poll_once(self):
         if not bool(self._cfg("enable_push", True)):

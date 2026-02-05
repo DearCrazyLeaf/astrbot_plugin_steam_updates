@@ -57,7 +57,8 @@ AstrBot WebUI -> 插件 -> 插件配置
 | steam_web_api_key | Steam Web API Key（可选） |
 | steam_appids | AppID 列表（如 `730`） |
 | steam_lang | 语言（如 `schinese` / `english`） |
-| poll_interval_sec | 轮询间隔（秒） |
+| poll_interval_sec | 轮询间隔（秒，从起始时间开始计时） |
+| poll_start_time | 轮询起始时间（HH:MM） |
 | notify_group_ids | 推送群号列表 |
 | platform_id | 平台 ID（可选，如 chatbot2） |
 | message_mode | `card` 或 `text` |

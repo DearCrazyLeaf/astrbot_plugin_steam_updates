@@ -28,9 +28,15 @@
     "hint": "例如 schinese / english / japanese"
   },
   "poll_interval_sec": {
-    "description": "轮询间隔(秒)",
+    "description": "轮询间隔(秒，从起始时间计时)",
     "type": "int",
     "default": 600
+  },
+  "poll_start_time": {
+    "description": "轮询起始时间",
+    "type": "string",
+    "default": "06:00",
+    "hint": "24小时制 HH:MM，从该时间点开始按间隔轮询"
   },
   "notify_group_ids": {
     "description": "推送群号列表",
