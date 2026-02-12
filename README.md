@@ -14,7 +14,7 @@
 这是一个为 **AstrBot** 编写的 Steam 更新推送插件，支持多 AppID 订阅、群推送、卡片/文本两种输出
 
 > [!IMPORTANT]
-> 本插件使用 **Steam News API** 获取更新日志，如需更高频或更稳定请求，可配置 Steam Web API Key
+> 本插件优先使用 **Steam News API** 获取更新日志；当 API 失败或返回为空时，可启用 Steam Feed 自动回退
 
 ---
 
@@ -55,6 +55,8 @@ AstrBot WebUI -> 插件 -> 插件配置
 |--------|------|
 | enable_push | 是否启用插件 |
 | steam_web_api_key | Steam Web API Key（可选） |
+| enable_feed_fallback | 是否启用 Steam Feed 回退 |
+| feed_timeout_sec | Feed 回退超时秒数 |
 | steam_appids | AppID 列表（如 `730`） |
 | steam_lang | 语言（如 `schinese` / `english`） |
 | poll_interval_sec | 轮询间隔（秒，从起始时间开始计时） |
@@ -70,7 +72,13 @@ AstrBot WebUI -> 插件 -> 插件配置
 | content_max_chars | 单游戏正文最大字符数 |
 | image_max_per_item | 每条更新最多渲染图片数 |
 | image_max_height | 图片最大高度 |
-| debug_log | 调试日志 |
+| debug_log | 调试日志（仅控制台输出） |
+
+### 🧪 调试日志 | Debug Logs
+
+- 打开 `debug_log` 后，插件会输出结构化日志到 AstrBot 控制台
+- 主要阶段：`poll`、`fetch`、`fetch_api`、`fetch_feed`、`manual`、`manual_cmd`、`send`、`push`、`ping`
+- 不会生成额外日志文件，便于在线排查
 
 ---
 

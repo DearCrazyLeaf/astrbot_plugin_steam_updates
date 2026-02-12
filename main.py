@@ -1,9 +1,13 @@
 import asyncio
+import hashlib
+import html
 import json
 import math
 import os
 import re
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,6 +31,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 
 PLUGIN_ID = "astrbot_plugin_steam_updates"
 STEAM_NEWS_API = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/"
+STEAM_NEWS_FEED_API = "https://store.steampowered.com/feeds/news/app/{appid}/"
 STEAM_IMAGE_DOMAINS = {
     "steamcommunity.com",
     "steampowered.com",
@@ -81,6 +86,7 @@ class SteamUpdatePush(Star):
         self._appid_name_map: dict[str, Any] | None = None
         self._name_cache: dict[str, str] | None = None
         self._name_cache_path = self._data_dir / "app_name_cache.json"
+        self._trace_seq = 0
 
     # --- lifecycle ---
     async def initialize(self):
@@ -105,6 +111,42 @@ class SteamUpdatePush(Star):
         if self._cfg("debug_log", False):
             logger.info("[steam_updates] " + msg)
 
+    def _next_trace_id(self, prefix: str) -> str:
+        self._trace_seq = (self._trace_seq + 1) % 1_000_000
+        return f"{prefix}-{datetime.now().strftime('%H%M%S')}-{self._trace_seq:06d}"
+
+    @staticmethod
+    def _fmt_kv(**kwargs: Any) -> str:
+        parts = []
+        for key, value in kwargs.items():
+            if value is None:
+                continue
+            parts.append(f"{key}={value}")
+        return " ".join(parts)
+
+    def _log_debug(self, stage: str, msg: str, **kwargs: Any) -> None:
+        if not self._cfg("debug_log", False):
+            return
+        kv = self._fmt_kv(**kwargs)
+        if kv:
+            logger.info(f"[steam_updates][{stage}] {msg} | {kv}")
+        else:
+            logger.info(f"[steam_updates][{stage}] {msg}")
+
+    def _log_warn(self, stage: str, msg: str, **kwargs: Any) -> None:
+        kv = self._fmt_kv(**kwargs)
+        if kv:
+            logger.warning(f"[steam_updates][{stage}] {msg} | {kv}")
+        else:
+            logger.warning(f"[steam_updates][{stage}] {msg}")
+
+    def _log_error(self, stage: str, msg: str, **kwargs: Any) -> None:
+        kv = self._fmt_kv(**kwargs)
+        if kv:
+            logger.error(f"[steam_updates][{stage}] {msg} | {kv}")
+        else:
+            logger.error(f"[steam_updates][{stage}] {msg}")
+
     def _get_max_days(self) -> int:
         raw = self._cfg("max_days", 1)
         try:
@@ -112,6 +154,16 @@ class SteamUpdatePush(Star):
         except Exception:
             value = 1
         return max(1, value)
+
+    def _enable_feed_fallback(self) -> bool:
+        return bool(self._cfg("enable_feed_fallback", True))
+
+    def _get_feed_timeout_sec(self) -> int:
+        try:
+            timeout = int(self._cfg("feed_timeout_sec", 10))
+        except Exception:
+            timeout = 10
+        return max(3, min(timeout, 60))
 
     @staticmethod
     def _font_height(font: ImageFont.FreeTypeFont | None, sample: str = "测") -> int:
@@ -187,8 +239,7 @@ class SteamUpdatePush(Star):
             now = datetime.now().astimezone()
             next_run = self._next_poll_time(now)
             wait_sec = max(0, (next_run - now).total_seconds())
-            if self._cfg("debug_log", False):
-                self._debug(f"next poll at {next_run.isoformat()}")
+            self._log_debug("poll", "next schedule", now=now.isoformat(), next=next_run.isoformat(), wait_sec=int(wait_sec))
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=wait_sec)
                 if self._stop_event.is_set():
@@ -197,39 +248,66 @@ class SteamUpdatePush(Star):
                 pass
             try:
                 await self._poll_once()
-            except Exception as exc:
-                logger.exception("[steam_updates] poll failed")
+            except Exception:
+                logger.exception("[steam_updates][poll] loop execution failed")
 
     async def _poll_once(self):
+        trace = self._next_trace_id("poll")
+        self._log_debug("poll", "start", trace=trace)
         if not bool(self._cfg("enable_push", True)):
+            self._log_debug("poll", "skip: plugin disabled", trace=trace)
             return
         group_ids = [str(x).strip() for x in self._cfg("notify_group_ids", []) or []]
         group_ids = [g for g in group_ids if g]
         if not group_ids:
-            self._debug("notify_group_ids empty, skip")
+            self._log_debug("poll", "skip: notify_group_ids empty", trace=trace)
             return
         appids = self._normalize_appids(self._cfg("steam_appids", []))
         if not appids:
-            self._debug("steam_appids empty, skip")
+            self._log_debug("poll", "skip: steam_appids empty", trace=trace)
             return
 
         state = self._load_state()
         max_days = self._get_max_days()
         # Ensure enough items to cover all updates of today (Steam API has an upper bound).
         fetch_count = max(max_days, 50)
+        self._log_debug(
+            "poll",
+            "resolved config",
+            trace=trace,
+            app_count=len(appids),
+            group_count=len(group_ids),
+            max_days=max_days,
+            fetch_count=fetch_count,
+        )
         updates_by_app: dict[str, list[NewsItem]] = {}
         for appid in appids:
             items = await self._fetch_news(appid, fetch_count)
             if not items:
+                self._log_debug("poll", "appid has no updates", trace=trace, appid=appid)
                 continue
             latest_gid = items[0].gid
             if state.get(appid) == latest_gid:
+                self._log_debug(
+                    "poll",
+                    "appid unchanged",
+                    trace=trace,
+                    appid=appid,
+                    gid=latest_gid,
+                )
                 continue
             updates_by_app[appid] = self._filter_recent_days(items, max_days)
 
         if not updates_by_app:
-            self._debug("no updates")
+            self._log_debug("poll", "no app has new updates", trace=trace)
             return
+        self._log_debug(
+            "poll",
+            "updates collected",
+            trace=trace,
+            app_count=len(updates_by_app),
+            groups=len(group_ids),
+        )
 
         sections = await self._build_sections(appids, updates_by_app)
         latest_ts = max(
@@ -249,25 +327,45 @@ class SteamUpdatePush(Star):
             else:
                 text = self._build_text_message(sections, publish_text)
                 await self._push_text(group_ids, text)
+        self._log_debug(
+            "poll",
+            "push finished",
+            trace=trace,
+            app_count=len(updates_by_app),
+            groups=len(group_ids),
+        )
 
         # update state only after push
         for appid, items in updates_by_app.items():
             state[appid] = items[0].gid
 
         self._save_state(state)
+        self._log_debug("poll", "state updated", trace=trace, state_size=len(state))
 
     async def _manual_query(self, umo: str | None = None):
+        trace = self._next_trace_id("manual")
         appids = self._normalize_appids(self._cfg("steam_appids", []))
         if not appids:
+            self._log_warn("manual", "skip: steam_appids empty", trace=trace)
             return None, "未配置 AppID，无法查询"
 
         max_days = self._get_max_days()
         fetch_count = max(max_days, 50)
+        self._log_debug(
+            "manual",
+            "start",
+            trace=trace,
+            app_count=len(appids),
+            max_days=max_days,
+            fetch_count=fetch_count,
+            umo=umo,
+        )
 
         updates_by_app: dict[str, list[NewsItem]] = {}
         for appid in appids:
             items = await self._fetch_news(appid, fetch_count, only_today=True)
             if not items:
+                self._log_debug("manual", "today has no updates", trace=trace, appid=appid)
                 continue
             updates_by_app[appid] = items
 
@@ -280,10 +378,24 @@ class SteamUpdatePush(Star):
             for appid in appids:
                 items = await self._fetch_news(appid, fetch_count, only_today=False)
                 if not items:
+                    self._log_debug("manual", "fallback has no updates", trace=trace, appid=appid)
                     continue
                 updates_by_app[appid] = self._filter_recent_days(items, max_days)
+            self._log_debug(
+                "manual",
+                "fallback path used",
+                trace=trace,
+                app_count=len(updates_by_app),
+                max_days=max_days,
+            )
 
         if not updates_by_app:
+            self._log_warn(
+                "manual",
+                "no updates from all sources",
+                trace=trace,
+                appids=",".join(appids),
+            )
             return None, "未获取到更新数据"
 
         sections = await self._build_sections(appids, updates_by_app, umo)
@@ -296,12 +408,15 @@ class SteamUpdatePush(Star):
 
         if str(self._cfg("message_mode", "card")).lower() == "text":
             text_msg = self._build_text_message(sections, publish_text, notice)
+            self._log_debug("manual", "done", trace=trace, mode="text")
             return text_msg, None
 
         image_bytes = await self._render_card(sections, publish_text, query_text, notice)
         if image_bytes:
+            self._log_debug("manual", "done", trace=trace, mode="card")
             return image_bytes, None
         text_msg = self._build_text_message(sections, publish_text, notice)
+        self._log_warn("manual", "card render failed, fallback text", trace=trace)
         return text_msg, None
 
 
@@ -333,25 +448,59 @@ class SteamUpdatePush(Star):
         return uniq
 
     # --- data fetch ---
+    def _steam_lang(self) -> str:
+        return str(self._cfg("steam_lang", "schinese")).strip() or "schinese"
+
     async def _fetch_news(self, appid: str, count: int, only_today: bool = True) -> list[NewsItem]:
         if not self._client:
+            self._log_warn("fetch", "http client not ready", appid=appid)
             return []
+
+        api_items = await self._fetch_news_api(appid, count)
+        source = "api"
+        items = api_items
+        if not items and self._enable_feed_fallback():
+            self._log_debug("fetch", "api empty, fallback to feed", appid=appid)
+            items = await self._fetch_news_feed(appid, count)
+            source = "feed"
+
+        if not items:
+            self._log_warn("fetch", "no news from api/feed", appid=appid, only_today=only_today)
+            return []
+
+        if only_today:
+            filtered = self._filter_today_items(items)
+            self._log_debug(
+                "fetch",
+                "news fetched and filtered",
+                appid=appid,
+                source=source,
+                total=len(items),
+                today=len(filtered),
+            )
+            return filtered
+
+        self._log_debug("fetch", "news fetched", appid=appid, source=source, total=len(items))
+        return items
+
+    async def _fetch_news_api(self, appid: str, count: int) -> list[NewsItem]:
         params = {
             "appid": appid,
             "count": max(1, count),
             "maxlength": 0,
             "format": "json",
-            "l": str(self._cfg("steam_lang", "schinese")).strip() or "schinese",
+            "l": self._steam_lang(),
         }
         api_key = str(self._cfg("steam_web_api_key", "")).strip()
+        has_key = bool(api_key)
         if api_key:
             params["key"] = api_key
         try:
-            resp = await self._client.get(STEAM_NEWS_API, params=params)
+            resp = await self._client.get(STEAM_NEWS_API, params=params, timeout=10)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
-            logger.error("[steam_updates] fetch news failed (%s): %s", appid, exc)
+            self._log_warn("fetch_api", "request failed", appid=appid, error=exc, has_key=has_key)
             return []
 
         items = data.get("appnews", {}).get("newsitems", []) or []
@@ -366,8 +515,92 @@ class SteamUpdatePush(Star):
                     date=int(item.get("date", 0)),
                 )
             )
-        if only_today:
-            return self._filter_today_items(results)
+        self._log_debug(
+            "fetch_api",
+            "request ok",
+            appid=appid,
+            status=resp.status_code,
+            item_count=len(results),
+            has_key=has_key,
+        )
+        return results
+
+    @staticmethod
+    def _feed_text_to_plain(text: str) -> str:
+        if not text:
+            return ""
+        text = html.unescape(text)
+        text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+        text = re.sub(r"(?is)<[^>]+>", "", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _gid_from_feed(link: str, title: str, ts: int) -> str:
+        link = (link or "").strip()
+        match = re.search(r"/view/(\d+)", link)
+        if match:
+            return match.group(1)
+        raw = f"{link}|{title}|{ts}"
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+
+    @staticmethod
+    def _parse_feed_pub_ts(pub_date: str) -> int:
+        if not pub_date:
+            return 0
+        try:
+            dt = parsedate_to_datetime(pub_date)
+            if dt is None:
+                return 0
+            return int(dt.timestamp())
+        except Exception:
+            return 0
+
+    async def _fetch_news_feed(self, appid: str, count: int) -> list[NewsItem]:
+        feed_url = STEAM_NEWS_FEED_API.format(appid=appid)
+        params = {"l": self._steam_lang()}
+        timeout = self._get_feed_timeout_sec()
+        try:
+            resp = await self._client.get(feed_url, params=params, timeout=timeout)
+            resp.raise_for_status()
+            body = resp.text
+        except Exception as exc:
+            self._log_warn("fetch_feed", "request failed", appid=appid, error=exc)
+            return []
+
+        try:
+            root = ET.fromstring(body)
+        except Exception as exc:
+            self._log_warn("fetch_feed", "xml parse failed", appid=appid, error=exc)
+            return []
+
+        items = root.findall(".//item")
+        max_count = max(1, count)
+        results: list[NewsItem] = []
+        for item in items[:max_count]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub_date = (item.findtext("pubDate") or "").strip()
+            desc = (item.findtext("description") or "").strip()
+            ts = self._parse_feed_pub_ts(pub_date)
+            gid = self._gid_from_feed(link, title, ts)
+            results.append(
+                NewsItem(
+                    gid=gid,
+                    title=title,
+                    url=link,
+                    contents=self._feed_text_to_plain(desc),
+                    date=ts,
+                )
+            )
+        self._log_debug(
+            "fetch_feed",
+            "request ok",
+            appid=appid,
+            status=resp.status_code,
+            item_count=len(results),
+        )
         return results
 
     def _filter_today_items(self, items: list[NewsItem]) -> list[NewsItem]:
@@ -1379,19 +1612,23 @@ class SteamUpdatePush(Star):
         await self._push_chain(group_ids, chain)
 
     async def _push_chain(self, group_ids: list[str], chain: MessageChain):
+        self._log_debug("push", "start", group_count=len(group_ids), chain_size=len(chain.chain))
         for gid in group_ids:
             sent = await self._send_to_group(gid, chain)
             if not sent:
-                logger.warning("[steam_updates] push failed: group %s", gid)
+                self._log_warn("push", "group failed", group_id=gid)
+            else:
+                self._log_debug("push", "group sent", group_id=gid)
 
     async def _send_to_group(self, group_id: str, chain: MessageChain) -> bool:
         session = self._build_session_id(group_id)
         if session:
             try:
                 await self.context.send_message(session=session, message_chain=chain)
+                self._log_debug("send", "via session", group_id=group_id, session=session)
                 return True
             except Exception as exc:
-                self._debug(f"send_message failed: {exc}")
+                self._log_warn("send", "session failed", group_id=group_id, session=session, error=exc)
 
         # fallback: aiocqhttp bot
         if self._last_bot and hasattr(self._last_bot, "send_group_msg"):
@@ -1399,9 +1636,12 @@ class SteamUpdatePush(Star):
                 await self._last_bot.send_group_msg(
                     group_id=int(group_id), message=chain.chain
                 )
+                self._log_debug("send", "via bot", group_id=group_id)
                 return True
             except Exception as exc:
-                self._debug(f"bot send_group_msg failed: {exc}")
+                self._log_warn("send", "bot fallback failed", group_id=group_id, error=exc)
+        else:
+            self._log_warn("send", "no available sender", group_id=group_id)
         return False
 
     def _build_session_id(self, group_id: str) -> str | None:
@@ -1412,6 +1652,7 @@ class SteamUpdatePush(Star):
             if self._last_platform_name:
                 platform_id = self._last_platform_name
             else:
+                self._log_warn("send", "platform id unresolved", group_id=group_id)
                 return None
         return f"{platform_id}:GroupMessage:{group_id}"
 
@@ -1500,35 +1741,60 @@ class SteamUpdatePush(Star):
             group_id = str(event.get_group_id() or "").strip()
         except Exception:
             group_id = ""
+        user_id = ""
+        for attr in ("get_sender_id", "get_user_id"):
+            fn = getattr(event, attr, None)
+            if callable(fn):
+                try:
+                    user_id = str(fn() or "").strip()
+                    if user_id:
+                        break
+                except Exception:
+                    continue
+        self._log_debug(
+            "manual_cmd",
+            "command matched",
+            command=text,
+            group_id=group_id,
+            user_id=user_id,
+        )
         if not group_id:
+            self._log_warn("manual_cmd", "reject: no group id", command=text, user_id=user_id)
             yield event.plain_result("请在群聊中使用该指令")
             return
 
         if not bool(self._cfg("enable_push", True)):
+            self._log_warn("manual_cmd", "reject: plugin disabled", group_id=group_id, user_id=user_id)
             yield event.plain_result("插件未启用")
             return
 
         allowed = [str(x).strip() for x in self._cfg("notify_group_ids", []) or []]
         allowed = [g for g in allowed if g]
         if not allowed:
+            self._log_warn("manual_cmd", "reject: notify_group_ids empty", group_id=group_id, user_id=user_id)
             yield event.plain_result("未配置生效群，手动查询已禁用")
             return
         if group_id not in allowed:
+            self._log_warn("manual_cmd", "reject: group not allowed", group_id=group_id, user_id=user_id)
             yield event.plain_result("当前群未启用插件")
             return
 
         yield event.plain_result("正在查询更新，请稍后...")
         result, err = await self._manual_query(event.unified_msg_origin)
         if err:
+            self._log_warn("manual_cmd", "query failed", group_id=group_id, user_id=user_id, error=err)
             yield event.plain_result(err)
             return
         if isinstance(result, bytes):
             path = self._save_temp_image(result)
             if path:
+                self._log_debug("manual_cmd", "reply image", group_id=group_id, user_id=user_id, path=path)
                 yield event.image_result(path)
             else:
+                self._log_warn("manual_cmd", "reply image failed", group_id=group_id, user_id=user_id)
                 yield event.plain_result("图片生成失败，请稍后重试")
         else:
+            self._log_debug("manual_cmd", "reply text", group_id=group_id, user_id=user_id)
             yield event.plain_result(result or "暂无更新")
 
 
@@ -1540,5 +1806,11 @@ class SteamUpdatePush(Star):
         self._last_platform_name = event.get_platform_name()
         if isinstance(event, AiocqhttpMessageEvent):
             self._last_bot = event.bot
+        self._log_debug(
+            "ping",
+            "captured sender context",
+            platform=self._last_platform_name,
+            has_bot=bool(self._last_bot),
+        )
         yield event.plain_result("Steam 更新推送已就绪")
 
