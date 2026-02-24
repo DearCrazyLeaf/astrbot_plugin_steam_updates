@@ -57,6 +57,8 @@ AstrBot WebUI -> 插件 -> 插件配置
 | steam_web_api_key | Steam Web API Key（可选） |
 | enable_feed_fallback | 是否启用 Steam Feed 回退 |
 | feed_timeout_sec | Feed 回退超时秒数 |
+| proxy_mode | 代理模式：`off` / `system` / `custom` |
+| proxy_url | 自定义代理地址（仅 `custom` 生效） |
 | steam_appids | AppID 列表（如 `730`） |
 | steam_lang | 语言（如 `schinese` / `english`） |
 | poll_interval_sec | 轮询间隔（秒，从起始时间开始计时） |
@@ -79,6 +81,12 @@ AstrBot WebUI -> 插件 -> 插件配置
 - 打开 `debug_log` 后，插件会输出结构化日志到 AstrBot 控制台
 - 主要阶段：`poll`、`fetch`、`fetch_api`、`fetch_feed`、`manual`、`manual_cmd`、`send`、`push`、`ping`
 - 不会生成额外日志文件，便于在线排查
+
+### 🌐 代理说明 | Proxy
+
+- `proxy_mode=system`：读取系统/容器环境变量（如 `HTTP_PROXY` / `HTTPS_PROXY`）
+- `proxy_mode=custom`：使用 `proxy_url` 指定代理
+- `proxy_mode=off`：不使用代理，直连请求
 
 ---
 

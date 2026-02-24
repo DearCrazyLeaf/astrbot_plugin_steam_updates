@@ -90,7 +90,7 @@ class SteamUpdatePush(Star):
 
     # --- lifecycle ---
     async def initialize(self):
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+        self._client = self._build_http_client()
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def terminate(self):
@@ -110,6 +110,56 @@ class SteamUpdatePush(Star):
     def _debug(self, msg: str):
         if self._cfg("debug_log", False):
             logger.info("[steam_updates] " + msg)
+
+    def _proxy_mode(self) -> str:
+        mode = str(self._cfg("proxy_mode", "system")).strip().lower()
+        if mode not in {"off", "system", "custom"}:
+            return "system"
+        return mode
+
+    def _proxy_url(self) -> str:
+        return str(self._cfg("proxy_url", "")).strip()
+
+    @staticmethod
+    def _mask_proxy_url(url: str) -> str:
+        if not url:
+            return ""
+        # Hide credentials if user accidentally configured auth in URL.
+        return re.sub(r"://([^:@/]+):([^@/]+)@", r"://\1:***@", url)
+
+    def _build_http_client(self) -> httpx.AsyncClient:
+        timeout = httpx.Timeout(10.0)
+        mode = self._proxy_mode()
+
+        if mode == "off":
+            self._log_debug("network", "client init", proxy_mode=mode, trust_env=False)
+            return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+        if mode == "system":
+            # Use OS/container proxy env such as HTTP_PROXY / HTTPS_PROXY.
+            self._log_debug("network", "client init", proxy_mode=mode, trust_env=True)
+            return httpx.AsyncClient(timeout=timeout, trust_env=True)
+
+        proxy_url = self._proxy_url()
+        if not proxy_url:
+            self._log_warn(
+                "network",
+                "proxy_mode=custom but proxy_url is empty; fallback to direct",
+            )
+            return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+        masked = self._mask_proxy_url(proxy_url)
+        try:
+            self._log_debug("network", "client init", proxy_mode=mode, proxy=masked)
+            return httpx.AsyncClient(timeout=timeout, proxy=proxy_url, trust_env=False)
+        except Exception as exc:
+            self._log_warn(
+                "network",
+                "custom proxy init failed; fallback to direct",
+                proxy=masked,
+                error=exc,
+            )
+            return httpx.AsyncClient(timeout=timeout, trust_env=False)
 
     def _next_trace_id(self, prefix: str) -> str:
         self._trace_seq = (self._trace_seq + 1) % 1_000_000
