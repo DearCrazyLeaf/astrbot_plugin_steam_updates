@@ -373,7 +373,11 @@ class SteamUpdatePush(Star):
         else:
             image_bytes = await self._render_card(sections, publish_text, query_text)
             if image_bytes:
-                await self._push_image(group_ids, image_bytes)
+                sent = await self._push_image(group_ids, image_bytes)
+                if not sent:
+                    self._log_warn("poll", "image push failed, fallback to text", trace=trace)
+                    text = self._build_text_message(sections, publish_text)
+                    await self._push_text(group_ids, text)
             else:
                 text = self._build_text_message(sections, publish_text)
                 await self._push_text(group_ids, text)
@@ -1653,22 +1657,33 @@ class SteamUpdatePush(Star):
         return ImageFont.load_default()
 
     # --- send ---
-    async def _push_text(self, group_ids: list[str], text: str):
+    async def _push_text(self, group_ids: list[str], text: str) -> bool:
         chain = MessageChain(chain=[Plain(text)])
-        await self._push_chain(group_ids, chain)
+        return await self._push_chain(group_ids, chain)
 
-    async def _push_image(self, group_ids: list[str], image_bytes: bytes):
-        chain = MessageChain(chain=[Image(image_bytes)])
-        await self._push_chain(group_ids, chain)
+    async def _push_image(self, group_ids: list[str], image_bytes: bytes) -> bool:
+        path = self._save_temp_image(image_bytes)
+        if not path:
+            self._log_warn("push", "save temp image failed")
+            return False
+        try:
+            chain = MessageChain(chain=[Image(file=path)])
+        except Exception as exc:
+            self._log_warn("push", "build image chain failed", path=path, error=exc)
+            return False
+        return await self._push_chain(group_ids, chain)
 
-    async def _push_chain(self, group_ids: list[str], chain: MessageChain):
+    async def _push_chain(self, group_ids: list[str], chain: MessageChain) -> bool:
         self._log_debug("push", "start", group_count=len(group_ids), chain_size=len(chain.chain))
+        any_success = False
         for gid in group_ids:
             sent = await self._send_to_group(gid, chain)
             if not sent:
                 self._log_warn("push", "group failed", group_id=gid)
             else:
                 self._log_debug("push", "group sent", group_id=gid)
+                any_success = True
+        return any_success
 
     async def _send_to_group(self, group_id: str, chain: MessageChain) -> bool:
         session = self._build_session_id(group_id)
