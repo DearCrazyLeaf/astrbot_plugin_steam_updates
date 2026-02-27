@@ -1,6 +1,6 @@
 # Steam Update Push (AstrBot Plugin)
 
-### Steam 更新日志推送（Steam News API）
+### Steam 游戏/创意工坊更新推送（Steam News API）
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-v4.12%2B-brightgreen)
 ![License](https://img.shields.io/badge/License-GPL--3.0-orange)
@@ -11,10 +11,12 @@
 
 ## ✅ 简介 | Introduction
 
-这是一个为 **AstrBot** 编写的 Steam 更新推送插件，支持多 AppID 订阅、群推送、卡片/文本两种输出
+这是一个为 **AstrBot** 编写的插件：轮询游戏/创意工坊更新并推送（支持多 AppID、创意工坊ID、卡片或文本）
+
+当前版本：`v1.2.4`
 
 > [!IMPORTANT]
-> 本插件优先使用 **Steam News API** 获取更新日志；当 API 失败或返回为空时，可启用 Steam Feed 自动回退
+> 本插件优先使用 **Steam News API** 获取游戏更新日志；当 API 失败或返回为空时，可启用 Steam Feed 自动回退
 
 ---
 
@@ -26,8 +28,11 @@
 - **LLM整理**：可选用大模型对更新内容进行翻译/总结/排版
 - **卡片/文本**：两种输出模式可选
 - **无更新静默**：当天无更新不推送
+- **创意工坊订阅监控**：支持轮询 Workshop PublishedFileID，发现更新时间变化后推送，支持查询非公开创意工坊内容
 
 <img width="900" height="1184" alt="preview" src="https://github.com/user-attachments/assets/59a296a5-23f8-428f-9a32-72e38f64289c" />
+
+<img width="900" height="847" alt="workshop_public_3240880604_v4_spacing" src="https://github.com/user-attachments/assets/74d16dc0-f15e-41e8-9d59-50b25dca6231" />
 
 ---
 
@@ -60,13 +65,19 @@ AstrBot WebUI -> 插件 -> 插件配置
 | proxy_mode | 代理模式：`off` / `system` / `custom` |
 | proxy_url | 自定义代理地址（仅 `custom` 生效） |
 | steam_appids | AppID 列表（如 `730`） |
+| workshop_enable | 是否启用创意工坊订阅监控 |
+| workshop_item_ids | 创意工坊订阅ID列表（PublishedFileID） |
+| workshop_api_base | 创意工坊API基础地址 |
+| workshop_timeout_sec | 创意工坊请求超时秒数 |
+| workshop_push_on_first_seen | 首次发现时是否立即推送（默认仅记录基线） |
 | steam_lang | 语言（如 `schinese` / `english`） |
 | poll_interval_sec | 轮询间隔（秒，从起始时间开始计时） |
 | poll_start_time | 轮询起始时间（HH:MM） |
 | notify_group_ids | 推送群号列表 |
 | platform_id | 平台 ID（可选，如 chatbot2） |
 | message_mode | `card` 或 `text` |
-| manual_query_command | 手动查询指令（可配置多个） |
+| manual_query_game_command | 游戏更新手动查询指令（可配置多个） |
+| manual_query_workshop_command | 创意工坊手动查询指令（可配置多个） |
 | content_process_mode | 内容处理方式：`plugin` / `llm` |
 | llm_provider_id | LLM 提供商ID（可选） |
 | llm_prompt | LLM 提示词（仅 llm 模式生效） |
@@ -145,6 +156,7 @@ mixin:
 
 ### 📣 自动推送
 开启 `enable_push` 即启用插件，插件会自动轮询 Steam 更新日志并推送到配置的群
+若同时开启 `workshop_enable` 并配置 `workshop_item_ids`，会在同一轮询中检测创意工坊条目更新时间并合并推送
 
 ### 💬 手动查询
 群内发送任一配置指令即可触发，例如：

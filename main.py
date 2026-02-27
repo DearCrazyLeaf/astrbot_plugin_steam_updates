@@ -32,14 +32,17 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 PLUGIN_ID = "astrbot_plugin_steam_updates"
 STEAM_NEWS_API = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/"
 STEAM_NEWS_FEED_API = "https://store.steampowered.com/feeds/news/app/{appid}/"
+STEAM_WORKSHOP_DETAILS_API = "/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 STEAM_IMAGE_DOMAINS = {
     "steamcommunity.com",
     "steampowered.com",
     "steamstatic.com",
+    "steamusercontent.com",
     "akamaihd.net",
 }
 MAX_NEWS_IMAGE_BYTES = 4_000_000
 MAX_NEWS_IMAGE_PIXELS = 3_500_000
+MAX_NEWS_IMAGE_CACHE_FILES = 400
 
 
 @dataclass
@@ -49,6 +52,8 @@ class NewsItem:
     url: str
     contents: str
     date: int
+    appid: str = ""
+    image_url: str = ""
 
 
 @dataclass
@@ -77,6 +82,8 @@ class SteamUpdatePush(Star):
         self._state_path = self._data_dir / "state.json"
         self._app_header_dir = self._data_dir / "app_headers"
         self._app_header_dir.mkdir(parents=True, exist_ok=True)
+        self._news_image_dir = self._data_dir / "news_images"
+        self._news_image_dir.mkdir(parents=True, exist_ok=True)
 
         self._client: httpx.AsyncClient | None = None
         self._poll_task: asyncio.Task | None = None
@@ -215,6 +222,44 @@ class SteamUpdatePush(Star):
             timeout = 10
         return max(3, min(timeout, 60))
 
+    def _workshop_enabled(self) -> bool:
+        return bool(self._cfg("workshop_enable", False))
+
+    def _workshop_api_base(self) -> str:
+        base = str(self._cfg("workshop_api_base", "https://api.steampowered.com")).strip()
+        if not base:
+            base = "https://api.steampowered.com"
+        return base.rstrip("/")
+
+    def _workshop_timeout_sec(self) -> int:
+        try:
+            timeout = int(self._cfg("workshop_timeout_sec", 10))
+        except Exception:
+            timeout = 10
+        return max(3, min(timeout, 60))
+
+    def _workshop_push_on_first_seen(self) -> bool:
+        return bool(self._cfg("workshop_push_on_first_seen", False))
+
+    def _normalize_workshop_item_ids(self, raw_list: Any) -> list[str]:
+        item_ids: list[str] = []
+        for item in raw_list or []:
+            val = str(item).strip()
+            if not val:
+                continue
+            if val.isdigit():
+                item_ids.append(val)
+            else:
+                self._log_warn("workshop", "skip invalid workshop id", value=val)
+        # de-dup while keeping order
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for item_id in item_ids:
+            if item_id not in seen:
+                seen.add(item_id)
+                uniq.append(item_id)
+        return uniq
+
     @staticmethod
     def _font_height(font: ImageFont.FreeTypeFont | None, sample: str = "测") -> int:
         if not font:
@@ -313,8 +358,10 @@ class SteamUpdatePush(Star):
             self._log_debug("poll", "skip: notify_group_ids empty", trace=trace)
             return
         appids = self._normalize_appids(self._cfg("steam_appids", []))
-        if not appids:
-            self._log_debug("poll", "skip: steam_appids empty", trace=trace)
+        workshop_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
+        workshop_enabled = self._workshop_enabled() and bool(workshop_ids)
+        if not appids and not workshop_enabled:
+            self._log_debug("poll", "skip: steam_appids and workshop_item_ids both empty", trace=trace)
             return
 
         state = self._load_state()
@@ -326,6 +373,7 @@ class SteamUpdatePush(Star):
             "resolved config",
             trace=trace,
             app_count=len(appids),
+            workshop_count=len(workshop_ids) if workshop_enabled else 0,
             group_count=len(group_ids),
             max_days=max_days,
             fetch_count=fetch_count,
@@ -348,34 +396,75 @@ class SteamUpdatePush(Star):
                 continue
             updates_by_app[appid] = self._filter_recent_days(items, max_days)
 
-        if not updates_by_app:
-            self._log_debug("poll", "no app has new updates", trace=trace)
+        workshop_updates: list[NewsItem] = []
+        workshop_state_updates: dict[str, str] = {}
+        if workshop_enabled:
+            workshop_updates, workshop_state_updates = await self._collect_workshop_updates_for_poll(state)
+            self._log_debug(
+                "poll",
+                "workshop collected",
+                trace=trace,
+                update_count=len(workshop_updates),
+                state_update_count=len(workshop_state_updates),
+            )
+
+        if not updates_by_app and not workshop_updates:
+            self._log_debug("poll", "no app/workshop has new updates", trace=trace)
+            if workshop_state_updates:
+                state.update(workshop_state_updates)
+                self._save_state(state)
             return
         self._log_debug(
             "poll",
             "updates collected",
             trace=trace,
             app_count=len(updates_by_app),
+            workshop_update_count=len(workshop_updates),
             groups=len(group_ids),
         )
 
-        sections = await self._build_sections(appids, updates_by_app)
-        latest_ts = max(
-            (item.date for items in updates_by_app.values() for item in items if item.date),
-            default=int(datetime.now().timestamp()),
-        )
-        publish_text = datetime.fromtimestamp(latest_ts).strftime("%Y/%m/%d %H:%M")
-        query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
+        payload_batches: list[tuple[str, list[AppSection]]] = []
+        if updates_by_app:
+            game_sections = await self._build_sections(appids, updates_by_app)
+            payload_batches.append(("game", game_sections))
+        if workshop_updates:
+            workshop_sections = await self._build_workshop_sections(workshop_updates)
+            payload_batches.append(("workshop", workshop_sections))
 
-        if str(self._cfg("message_mode", "card")).lower() == "text":
-            text = self._build_text_message(sections, publish_text)
-            await self._push_text(group_ids, text)
-        else:
-            image_bytes = await self._render_card(sections, publish_text, query_text)
+        query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
+        mode = str(self._cfg("message_mode", "card")).lower()
+        for card_kind, sections in payload_batches:
+            latest_ts = max(
+                (
+                    item.date
+                    for sec in sections
+                    for item in sec.updates
+                    if item.date
+                ),
+                default=int(datetime.now().timestamp()),
+            )
+            publish_text = datetime.fromtimestamp(latest_ts).strftime("%Y/%m/%d %H:%M")
+
+            if mode == "text":
+                text = self._build_text_message(sections, publish_text)
+                await self._push_text(group_ids, text)
+                continue
+
+            image_bytes = await self._render_card(
+                sections,
+                publish_text,
+                query_text,
+                card_kind=card_kind,
+            )
             if image_bytes:
                 sent = await self._push_image(group_ids, image_bytes)
                 if not sent:
-                    self._log_warn("poll", "image push failed, fallback to text", trace=trace)
+                    self._log_warn(
+                        "poll",
+                        "image push failed, fallback to text",
+                        trace=trace,
+                        card_kind=card_kind,
+                    )
                     text = self._build_text_message(sections, publish_text)
                     await self._push_text(group_ids, text)
             else:
@@ -386,22 +475,45 @@ class SteamUpdatePush(Star):
             "push finished",
             trace=trace,
             app_count=len(updates_by_app),
+            workshop_update_count=len(workshop_updates),
+            payload_count=len(payload_batches),
             groups=len(group_ids),
         )
 
         # update state only after push
         for appid, items in updates_by_app.items():
             state[appid] = items[0].gid
+        if workshop_state_updates:
+            state.update(workshop_state_updates)
 
         self._save_state(state)
         self._log_debug("poll", "state updated", trace=trace, state_size=len(state))
 
-    async def _manual_query(self, umo: str | None = None):
+    async def _manual_query(self, umo: str | None = None, query_kind: str = "all"):
         trace = self._next_trace_id("manual")
+        kind = str(query_kind or "all").strip().lower()
+        if kind not in {"all", "game", "workshop"}:
+            kind = "all"
+        want_game = kind in {"all", "game"}
+        want_workshop = kind in {"all", "workshop"}
+
         appids = self._normalize_appids(self._cfg("steam_appids", []))
-        if not appids:
-            self._log_warn("manual", "skip: steam_appids empty", trace=trace)
-            return None, "未配置 AppID，无法查询"
+        workshop_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
+        workshop_enabled = want_workshop and self._workshop_enabled() and bool(workshop_ids)
+
+        if want_game and not appids and not workshop_enabled:
+            self._log_warn("manual", "skip: no appids for game query", trace=trace, query_kind=kind)
+            if kind == "game":
+                return None, "\u672a\u914d\u7f6e\u6e38\u620f AppID\uff0c\u65e0\u6cd5\u67e5\u8be2"
+
+        if want_workshop and not workshop_enabled and not appids:
+            self._log_warn("manual", "skip: workshop disabled or ids empty", trace=trace, query_kind=kind)
+            if kind == "workshop":
+                return None, "\u672a\u542f\u7528\u521b\u610f\u5de5\u574a\u8ba2\u9605\u76d1\u63a7\u6216\u672a\u914d\u7f6e\u8ba2\u9605ID\uff0c\u65e0\u6cd5\u67e5\u8be2"
+
+        if (not want_game or not appids) and not workshop_enabled:
+            self._log_warn("manual", "skip: no effective source", trace=trace, query_kind=kind)
+            return None, "\u672a\u914d\u7f6e\u53ef\u7528\u7684\u67e5\u8be2\u6e90\uff0c\u65e0\u6cd5\u67e5\u8be2"
 
         max_days = self._get_max_days()
         fetch_count = max(max_days, 50)
@@ -409,74 +521,110 @@ class SteamUpdatePush(Star):
             "manual",
             "start",
             trace=trace,
+            query_kind=kind,
             app_count=len(appids),
+            workshop_count=len(workshop_ids) if workshop_enabled else 0,
             max_days=max_days,
             fetch_count=fetch_count,
             umo=umo,
         )
 
         updates_by_app: dict[str, list[NewsItem]] = {}
-        for appid in appids:
-            items = await self._fetch_news(appid, fetch_count, only_today=True)
-            if not items:
-                self._log_debug("manual", "today has no updates", trace=trace, appid=appid)
-                continue
-            updates_by_app[appid] = items
+        if want_game:
+            for appid in appids:
+                items = await self._fetch_news(appid, fetch_count, only_today=True)
+                if not items:
+                    self._log_debug("manual", "today has no updates", trace=trace, appid=appid)
+                    continue
+                updates_by_app[appid] = items
+
+        workshop_all = await self._fetch_workshop_news_items() if workshop_enabled else []
+        workshop_updates = self._filter_today_items(workshop_all) if workshop_all else []
 
         notice = ""
-        if not updates_by_app:
+        if not updates_by_app and not workshop_updates:
             if max_days > 1:
-                notice = f"没有找到当天的更新信息，以下是最近 {max_days} 天的更新内容"
+                notice = f"\u6ca1\u6709\u627e\u5230\u5f53\u5929\u7684\u66f4\u65b0\u4fe1\u606f\uff0c\u4ee5\u4e0b\u662f\u6700\u8fd1 {max_days} \u5929\u7684\u66f4\u65b0\u5185\u5bb9"
             else:
-                notice = "没有找到当天的更新信息，以下是最近一次的更新内容"
-            for appid in appids:
-                items = await self._fetch_news(appid, fetch_count, only_today=False)
-                if not items:
-                    self._log_debug("manual", "fallback has no updates", trace=trace, appid=appid)
-                    continue
-                updates_by_app[appid] = self._filter_recent_days(items, max_days)
+                notice = "\u6ca1\u6709\u627e\u5230\u5f53\u5929\u7684\u66f4\u65b0\u4fe1\u606f\uff0c\u4ee5\u4e0b\u662f\u6700\u8fd1\u4e00\u6b21\u7684\u66f4\u65b0\u5185\u5bb9"
+            if want_game:
+                for appid in appids:
+                    items = await self._fetch_news(appid, fetch_count, only_today=False)
+                    if not items:
+                        self._log_debug("manual", "fallback has no updates", trace=trace, appid=appid)
+                        continue
+                    updates_by_app[appid] = self._filter_recent_days(items, max_days)
+            if workshop_all:
+                workshop_updates = self._filter_recent_days(workshop_all, max_days)
             self._log_debug(
                 "manual",
                 "fallback path used",
                 trace=trace,
+                query_kind=kind,
                 app_count=len(updates_by_app),
+                workshop_update_count=len(workshop_updates),
                 max_days=max_days,
             )
 
-        if not updates_by_app:
+        if not updates_by_app and not workshop_updates:
             self._log_warn(
                 "manual",
                 "no updates from all sources",
                 trace=trace,
+                query_kind=kind,
                 appids=",".join(appids),
             )
-            return None, "未获取到更新数据"
+            return None, "\u672a\u83b7\u53d6\u5230\u66f4\u65b0\u6570\u636e"
 
-        sections = await self._build_sections(appids, updates_by_app, umo)
-        latest_ts = max(
-            (item.date for items in updates_by_app.values() for item in items if item.date),
-            default=int(datetime.now().timestamp()),
-        )
-        publish_text = datetime.fromtimestamp(latest_ts).strftime("%Y/%m/%d %H:%M")
+        payload_batches: list[tuple[str, list[AppSection]]] = []
+        if want_game and updates_by_app:
+            game_sections = await self._build_sections(appids, updates_by_app, umo)
+            payload_batches.append(("game", game_sections))
+        if workshop_enabled:
+            workshop_sections = await self._build_workshop_sections(workshop_updates)
+            if workshop_sections:
+                payload_batches.append(("workshop", workshop_sections))
+
         query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
+        mode = str(self._cfg("message_mode", "card")).lower()
+        results: list[bytes | str] = []
+        first_batch = True
+        for card_kind, sections in payload_batches:
+            latest_ts = max(
+                (
+                    item.date
+                    for sec in sections
+                    for item in sec.updates
+                    if item.date
+                ),
+                default=int(datetime.now().timestamp()),
+            )
+            publish_text = datetime.fromtimestamp(latest_ts).strftime("%Y/%m/%d %H:%M")
+            batch_notice = notice if first_batch else ""
+            first_batch = False
 
-        if str(self._cfg("message_mode", "card")).lower() == "text":
-            text_msg = self._build_text_message(sections, publish_text, notice)
-            self._log_debug("manual", "done", trace=trace, mode="text")
-            return text_msg, None
+            if mode == "text":
+                results.append(self._build_text_message(sections, publish_text, batch_notice))
+                continue
 
-        image_bytes = await self._render_card(sections, publish_text, query_text, notice)
-        if image_bytes:
-            self._log_debug("manual", "done", trace=trace, mode="card")
-            return image_bytes, None
-        text_msg = self._build_text_message(sections, publish_text, notice)
-        self._log_warn("manual", "card render failed, fallback text", trace=trace)
-        return text_msg, None
+            image_bytes = await self._render_card(
+                sections,
+                publish_text,
+                query_text,
+                notice=batch_notice,
+                card_kind=card_kind,
+            )
+            if image_bytes:
+                results.append(image_bytes)
+            else:
+                self._log_warn("manual", "card render failed, fallback text", trace=trace, card_kind=card_kind)
+                results.append(self._build_text_message(sections, publish_text, batch_notice))
+
+        self._log_debug("manual", "done", trace=trace, mode=mode, payload_count=len(results))
+        return results, None
 
 
-    
-    def _manual_query_commands(self) -> list[str]:
-        raw = self._cfg("manual_query_command", ["STEAM更新"])
+    def _normalize_manual_commands(self, raw: Any, default_commands: list[str]) -> list[str]:
         commands: list[str] = []
         if isinstance(raw, str):
             parts = [p.strip() for p in raw.split(",")]
@@ -491,7 +639,7 @@ class SteamUpdatePush(Star):
             if val:
                 commands.append(val)
         if not commands:
-            commands = ["STEAM更新"]
+            commands = [str(c).strip() for c in default_commands if str(c).strip()]
         # de-dup while keeping order
         seen: set[str] = set()
         uniq: list[str] = []
@@ -500,6 +648,26 @@ class SteamUpdatePush(Star):
                 seen.add(cmd)
                 uniq.append(cmd)
         return uniq
+
+    def _manual_game_query_commands(self) -> list[str]:
+        raw = self._cfg("manual_query_game_command", None)
+        if raw is None:
+            # Backward compatibility for old config key.
+            raw = self._cfg("manual_query_command", ["STEAM更新"])
+        return self._normalize_manual_commands(raw, ["STEAM更新"])
+
+    def _manual_workshop_query_commands(self) -> list[str]:
+        raw = self._cfg("manual_query_workshop_command", ["\u521b\u610f\u5de5\u574a\u66f4\u65b0"])
+        return self._normalize_manual_commands(raw, ["\u521b\u610f\u5de5\u574a\u66f4\u65b0"])
+
+    @staticmethod
+    def _match_command(text: str, commands: list[str]) -> bool:
+        if not text or not commands:
+            return False
+        if text in commands:
+            return True
+        text_cf = text.casefold()
+        return text_cf in {cmd.casefold() for cmd in commands}
 
     # --- data fetch ---
     def _steam_lang(self) -> str:
@@ -537,6 +705,409 @@ class SteamUpdatePush(Star):
         self._log_debug("fetch", "news fetched", appid=appid, source=source, total=len(items))
         return items
 
+    async def _fetch_workshop_details(self, item_ids: list[str]) -> list[dict[str, Any]]:
+        if not self._client:
+            self._log_warn("workshop", "http client not ready")
+            return []
+        if not item_ids:
+            return []
+
+        async def _request(ids: list[str]) -> list[dict[str, Any]] | None:
+            url = f"{self._workshop_api_base()}{STEAM_WORKSHOP_DETAILS_API}"
+            data: dict[str, Any] = {"itemcount": len(ids)}
+            for i, item_id in enumerate(ids):
+                data[f"publishedfileids[{i}]"] = item_id
+            api_key = str(self._cfg("steam_web_api_key", "")).strip()
+            if api_key:
+                data["key"] = api_key
+            last_exc: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    resp = await self._client.post(url, data=data, timeout=self._workshop_timeout_sec())
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    details = payload.get("response", {}).get("publishedfiledetails", []) or []
+                    return [item for item in details if isinstance(item, dict)]
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 3:
+                        await asyncio.sleep(0.6 * attempt)
+                    continue
+            self._log_warn(
+                "workshop",
+                "details request failed",
+                error=last_exc,
+                count=len(ids),
+                attempts=3,
+            )
+            return None
+
+        batch = await _request(item_ids)
+        if batch is not None:
+            self._log_debug("workshop", "details request ok", count=len(batch), mode="batch")
+            return batch
+
+        if len(item_ids) <= 1:
+            return []
+
+        # Fallback: query each ID independently to avoid one bad item affecting all.
+        merged: list[dict[str, Any]] = []
+        for item_id in item_ids:
+            single = await _request([item_id])
+            if single:
+                merged.extend(single)
+        self._log_debug("workshop", "details request fallback done", count=len(merged), mode="single")
+        return merged
+
+    @staticmethod
+    def _extract_meta_content(page_text: str, key: str) -> str:
+        if not page_text:
+            return ""
+        # Match both `property=` and `name=` style meta tags.
+        patterns = [
+            rf'<meta\s+[^>]*property=["\']{re.escape(key)}["\'][^>]*content=["\']([^"\']+)["\'][^>]*>',
+            rf'<meta\s+[^>]*name=["\']{re.escape(key)}["\'][^>]*content=["\']([^"\']+)["\'][^>]*>',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, page_text, flags=re.I | re.S)
+            if match:
+                return html.unescape(match.group(1).strip())
+        return ""
+
+    @staticmethod
+    def _strip_html_text(raw_text: str) -> str:
+        if not raw_text:
+            return ""
+        text = re.sub(r"<[^>]+>", "", raw_text, flags=re.S)
+        text = html.unescape(text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _parse_workshop_time_text(self, text: str) -> int:
+        clean = self._strip_html_text(text)
+        if not clean:
+            return 0
+        clean = clean.replace(" at ", " @ ")
+        now = datetime.now()
+        fmts = [
+            "%d %b, %Y @ %I:%M%p",
+            "%d %b @ %I:%M%p",
+            "%d %b, %Y @ %H:%M",
+            "%d %b @ %H:%M",
+        ]
+        for fmt in fmts:
+            try:
+                parsed = datetime.strptime(clean, fmt)
+                if "%Y" not in fmt:
+                    parsed = parsed.replace(year=now.year)
+                    if parsed > now + timedelta(days=2):
+                        parsed = parsed.replace(year=now.year - 1)
+                return int(parsed.timestamp())
+            except Exception:
+                continue
+        return 0
+
+    def _extract_workshop_timestamp(self, page_text: str) -> int:
+        if not page_text:
+            return 0
+        # First prefer raw unix timestamp embedded in script payload.
+        ts_patterns = [
+            r'"time_updated"\s*:\s*"?(?P<ts>\d{9,13})"?',
+            r"time_updated\\\"\s*:\s*(?P<ts>\d{9,13})",
+            r"'time_updated'\s*:\s*(?P<ts>\d{9,13})",
+        ]
+        for pattern in ts_patterns:
+            match = re.search(pattern, page_text, flags=re.I)
+            if not match:
+                continue
+            try:
+                ts = int(match.group("ts"))
+                if ts > 10_000_000_000:
+                    ts //= 1000
+                if ts > 0:
+                    return ts
+            except Exception:
+                continue
+
+        # Fallback to visible "Updated" row.
+        left_labels = re.findall(
+            r'<div class="detailsStatLeft">\s*(.*?)\s*</div>',
+            page_text,
+            flags=re.I | re.S,
+        )
+        right_values = re.findall(
+            r'<div class="detailsStatRight">\s*(.*?)\s*</div>',
+            page_text,
+            flags=re.I | re.S,
+        )
+        for idx, left in enumerate(left_labels):
+            label = self._strip_html_text(left).lower()
+            if "updated" not in label:
+                continue
+            if idx >= len(right_values):
+                continue
+            ts = self._parse_workshop_time_text(right_values[idx])
+            if ts > 0:
+                return ts
+        return 0
+
+    def _workshop_page_to_news(
+        self,
+        workshop_id: str,
+        page_text: str,
+        final_url: str = "",
+    ) -> NewsItem | None:
+        if not workshop_id or not page_text:
+            return None
+
+        # Title
+        title = ""
+        match = re.search(
+            r'<div class="workshopItemTitle">\s*(.*?)\s*</div>',
+            page_text,
+            flags=re.I | re.S,
+        )
+        if match:
+            title = self._strip_html_text(match.group(1))
+        if not title:
+            title = self._extract_meta_content(page_text, "og:title")
+        if not title:
+            title_tag = re.search(r"<title>(.*?)</title>", page_text, flags=re.I | re.S)
+            if title_tag:
+                title = self._strip_html_text(title_tag.group(1))
+        if title.lower().startswith("steam workshop::"):
+            title = title.split("::", 1)[-1].strip()
+        if not title:
+            title = f"创意工坊项目 {workshop_id}"
+
+        # App ID
+        appid = ""
+        for pattern in [
+            r'"consumer_app_id"\s*:\s*"?(?P<id>\d+)"?',
+            r'"consumer_appid"\s*:\s*"?(?P<id>\d+)"?',
+            r'data-miniprofile-appid="(?P<id>\d+)"',
+            r"/app/(?P<id>\d+)",
+        ]:
+            m = re.search(pattern, page_text, flags=re.I)
+            if m:
+                appid = str(m.group("id")).strip()
+                break
+
+        # Author
+        author = ""
+        author_match = re.search(r"/profiles/(?P<id>\d{17})", page_text, flags=re.I)
+        if author_match:
+            author = author_match.group("id").strip()
+        else:
+            author_match = re.search(r"/id/(?P<id>[A-Za-z0-9_\-]+)/?", page_text, flags=re.I)
+            if author_match:
+                author = author_match.group("id").strip()
+
+        # Updated timestamp
+        ts = self._extract_workshop_timestamp(page_text)
+        if ts <= 0:
+            return None
+
+        # Summary
+        summary_raw = self._extract_meta_content(page_text, "og:description")
+        if not summary_raw:
+            summary_raw = self._extract_meta_content(page_text, "description")
+        summary_raw = re.sub(r"^Steam Workshop:\s*", "", summary_raw, flags=re.I).strip()
+        summary = self._summarize_text(summary_raw, 180) if summary_raw else ""
+
+        # Cover image
+        image_url = self._extract_meta_content(page_text, "og:image")
+
+        item_url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
+        if final_url and "filedetails/?id=" in final_url:
+            item_url = final_url.split("&", 1)[0]
+
+        content_lines = [f"ID: {workshop_id}"]
+        if author:
+            content_lines.append(f"作者ID: {author}")
+        content_lines.append(f"更新时间: {self._format_time(ts)}")
+        content_lines.append(f"摘要: {summary or '暂无'}")
+
+        return NewsItem(
+            gid=f"{workshop_id}:{ts}",
+            title=title,
+            url=item_url,
+            contents="\n".join(content_lines),
+            date=ts,
+            appid=appid,
+            image_url=image_url,
+        )
+
+    async def _fetch_workshop_detail_by_url(self, workshop_id: str) -> NewsItem | None:
+        if not self._client or not workshop_id:
+            return None
+        item_url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}&l=english"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                resp = await self._client.get(
+                    item_url,
+                    headers=headers,
+                    timeout=self._workshop_timeout_sec(),
+                    follow_redirects=True,
+                )
+                resp.raise_for_status()
+                news = self._workshop_page_to_news(workshop_id, resp.text, str(resp.url))
+                if news:
+                    self._log_debug("workshop_url", "url fallback hit", workshop_id=workshop_id, attempt=attempt)
+                else:
+                    self._log_warn("workshop_url", "url parse failed", workshop_id=workshop_id)
+                return news
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 3:
+                    await asyncio.sleep(0.6 * attempt)
+                continue
+        self._log_warn("workshop_url", "url fallback failed", workshop_id=workshop_id, error=last_exc)
+        return None
+
+    def _workshop_item_to_news(self, item: dict[str, Any]) -> NewsItem | None:
+        workshop_id = str(item.get("publishedfileid") or "").strip()
+        if not workshop_id:
+            return None
+        title = str(item.get("title") or f"创意工坊项目 {workshop_id}").strip()
+        time_updated_raw = item.get("time_updated")
+        try:
+            ts = int(time_updated_raw or 0)
+        except Exception:
+            ts = 0
+        if ts <= 0:
+            return None
+        url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
+        preview_url = str(item.get("preview_url") or "").strip()
+        appid = str(
+            item.get("consumer_app_id")
+            or item.get("consumer_appid")
+            or item.get("creator_app_id")
+            or item.get("creator_appid")
+            or ""
+        ).strip()
+        author = str(item.get("creator") or "").strip()
+        summary_raw = str(item.get("file_description") or "").strip()
+        summary = self._summarize_text(summary_raw, 180) if summary_raw else ""
+        content_lines = [f"ID: {workshop_id}"]
+        if author:
+            content_lines.append(f"作者ID: {author}")
+        content_lines.append(f"更新时间: {self._format_time(ts)}")
+        content_lines.append(f"摘要: {summary or '暂无'}")
+        return NewsItem(
+            gid=f"{workshop_id}:{ts}",
+            title=title,
+            url=url,
+            contents="\n".join(content_lines),
+            date=ts,
+            appid=appid,
+            image_url=preview_url,
+        )
+
+    async def _fetch_workshop_news_items(self) -> list[NewsItem]:
+        if not self._workshop_enabled():
+            return []
+        item_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
+        if not item_ids:
+            return []
+        details = await self._fetch_workshop_details(item_ids)
+        detail_map: dict[str, dict[str, Any]] = {}
+        for detail in details:
+            workshop_id = str(detail.get("publishedfileid") or "").strip()
+            if workshop_id:
+                detail_map[workshop_id] = detail
+
+        items: list[NewsItem] = []
+        for workshop_id in item_ids:
+            news: NewsItem | None = None
+
+            detail = detail_map.get(workshop_id)
+            if detail:
+                news = self._workshop_item_to_news(detail)
+                if news:
+                    self._log_debug("workshop", "api hit", workshop_id=workshop_id)
+                else:
+                    self._log_warn("workshop", "api miss, fallback to url", workshop_id=workshop_id)
+            else:
+                self._log_warn("workshop", "api miss, fallback to url", workshop_id=workshop_id)
+
+            if not news:
+                news = await self._fetch_workshop_detail_by_url(workshop_id)
+
+            if news:
+                items.append(news)
+            else:
+                self._log_warn("workshop", "skip item after api+url miss", workshop_id=workshop_id)
+
+        items.sort(key=lambda x: x.date, reverse=True)
+        return items
+
+    async def _collect_workshop_updates_for_poll(
+        self,
+        state: dict[str, str],
+    ) -> tuple[list[NewsItem], dict[str, str]]:
+        items = await self._fetch_workshop_news_items()
+        if not items:
+            return [], {}
+
+        updates: list[NewsItem] = []
+        state_updates: dict[str, str] = {}
+        push_on_first = self._workshop_push_on_first_seen()
+        for item in items:
+            workshop_id = item.gid.split(":", 1)[0]
+            state_key = f"workshop:{workshop_id}"
+            prev_raw = str(state.get(state_key, "")).strip()
+            try:
+                prev_ts = int(prev_raw) if prev_raw else 0
+            except Exception:
+                prev_ts = 0
+
+            if prev_ts <= 0:
+                state_updates[state_key] = str(item.date)
+                if push_on_first:
+                    updates.append(item)
+                continue
+
+            if item.date > prev_ts:
+                updates.append(item)
+                state_updates[state_key] = str(item.date)
+            elif state_key not in state:
+                state_updates[state_key] = str(item.date)
+
+        updates.sort(key=lambda x: x.date, reverse=True)
+        return updates, state_updates
+
+    async def _build_workshop_sections(self, items: list[NewsItem]) -> list[AppSection]:
+        if not items:
+            return []
+        grouped: dict[str, list[NewsItem]] = {}
+        for item in sorted(items, key=lambda x: x.date, reverse=True):
+            appid = str(item.appid or "").strip()
+            if not appid.isdigit():
+                appid = "unknown"
+            grouped.setdefault(appid, []).append(item)
+
+        appids = [aid for aid in grouped.keys() if aid.isdigit()]
+        app_names = await self._resolve_app_names(appids) if appids else {}
+
+        order = sorted(
+            grouped.keys(),
+            key=lambda aid: max((it.date for it in grouped.get(aid, []) if it.date), default=0),
+            reverse=True,
+        )
+        sections: list[AppSection] = []
+        for aid in order:
+            title = app_names.get(aid, "未知游戏") if aid != "unknown" else "未知游戏"
+            sections.append(
+                AppSection(
+                    appid=f"workshop:{aid}",
+                    title=title,
+                    updates=grouped.get(aid, []),
+                )
+            )
+        return sections
+
     async def _fetch_news_api(self, appid: str, count: int) -> list[NewsItem]:
         params = {
             "appid": appid,
@@ -567,6 +1138,7 @@ class SteamUpdatePush(Star):
                     url=str(item.get("url", "")),
                     contents=str(item.get("contents", "")),
                     date=int(item.get("date", 0)),
+                    appid=str(appid),
                 )
             )
         self._log_debug(
@@ -646,6 +1218,7 @@ class SteamUpdatePush(Star):
                     url=link,
                     contents=self._feed_text_to_plain(desc),
                     date=ts,
+                    appid=str(appid),
                 )
             )
         self._log_debug(
@@ -985,6 +1558,8 @@ class SteamUpdatePush(Star):
                 url=items[0].url,
                 contents=llm_text,
                 date=latest_ts,
+                appid=items[0].appid,
+                image_url=items[0].image_url,
             )
             sections.append(AppSection(appid=appid, title=title, updates=[merged]))
         return sections
@@ -1007,7 +1582,8 @@ class SteamUpdatePush(Star):
         self, sections: list[AppSection], publish_text: str, notice: str = ""
     ) -> str:
         lines: list[str] = []
-        lines.append("更新日志")
+        is_workshop_only = bool(sections) and all(str(sec.appid).startswith("workshop") for sec in sections)
+        lines.append("创意工坊更新日志" if is_workshop_only else "更新日志")
         lines.append(f"发布时间：{publish_text}")
         if notice:
             lines.append(notice)
@@ -1039,6 +1615,7 @@ class SteamUpdatePush(Star):
         publish_text: str,
         query_text: str,
         notice: str = "",
+        card_kind: str = "game",
     ) -> bytes | None:
         image_map = await self._prefetch_images(sections)
         header_map = await self._prefetch_app_headers(sections)
@@ -1046,7 +1623,7 @@ class SteamUpdatePush(Star):
         return await loop.run_in_executor(
             None,
             lambda: self._render_card_sync(
-                sections, publish_text, query_text, notice, image_map, header_map
+                sections, publish_text, query_text, notice, image_map, header_map, card_kind
             ),
         )
 
@@ -1061,6 +1638,10 @@ class SteamUpdatePush(Star):
         title_color: tuple[int, int, int],
         muted: tuple[int, int, int],
         accent: tuple[int, int, int],
+        left_title: str,
+        left_subtitle: str,
+        right_title: str = "更新日志",
+        right_subtitle: str = "UPDATE LOG",
     ) -> tuple[int, int, int]:
         header_bg = (32, 36, 41)
         divider = (58, 66, 78)
@@ -1070,25 +1651,20 @@ class SteamUpdatePush(Star):
         icon_y = header_h // 2
         steam_font = self._load_font(30, bold=True)
         left_x = padding
-        steam_text = "STEAM 游戏更新推送"
-        draw.text((left_x, icon_y - 24), steam_text, font=steam_font, fill=title_color)
+        draw.text((left_x, icon_y - 24), left_title, font=steam_font, fill=title_color)
+        draw.text((left_x, icon_y + 16), left_subtitle, font=small_font, fill=muted)
 
-        header_cn = "STEAM GAME UPDATE PUSH"
-        draw.text((left_x, icon_y + 16), header_cn, font=small_font, fill=muted)
-
-        right_label = "更新日志"
-        right_sub = "UPDATE LOG"
-        right_w = draw.textlength(right_label, font=header_font)
-        right_sub_w = draw.textlength(right_sub, font=small_font)
+        right_w = draw.textlength(right_title, font=header_font)
+        right_sub_w = draw.textlength(right_subtitle, font=small_font)
         draw.text(
             (width - padding - right_w, icon_y - 22),
-            right_label,
+            right_title,
             font=header_font,
             fill=accent,
         )
         draw.text(
             (width - padding - right_sub_w, icon_y + 10),
-            right_sub,
+            right_subtitle,
             font=small_font,
             fill=muted,
         )
@@ -1151,6 +1727,7 @@ class SteamUpdatePush(Star):
         notice: str,
         image_map: dict[str, PilImage.Image],
         header_map: dict[str, PilImage.Image],
+        card_kind: str = "game",
     ) -> bytes | None:
         width = 900
         padding = 52
@@ -1166,6 +1743,7 @@ class SteamUpdatePush(Star):
         blocks = self._build_card_blocks(
             sections,
             publish_text,
+            card_kind,
             max_text_width,
             title_font,
             header_font,
@@ -1188,6 +1766,9 @@ class SteamUpdatePush(Star):
         title_color = (199, 213, 224)
         muted = (143, 152, 160)
         accent = (102, 192, 244)
+        is_workshop_card = str(card_kind).strip().lower() == "workshop"
+        left_title = "STEAM 创意工坊更新推送" if is_workshop_card else "STEAM 游戏更新推送"
+        left_subtitle = "STEAM WORKSHOP UPDATE LOG" if is_workshop_card else "STEAM GAME UPDATE PUSH"
         header_bg = self._draw_card_header(
             draw,
             width,
@@ -1198,6 +1779,8 @@ class SteamUpdatePush(Star):
             title_color,
             muted,
             accent,
+            left_title=left_title,
+            left_subtitle=left_subtitle,
         )
 
         y = header_h + 28
@@ -1223,6 +1806,7 @@ class SteamUpdatePush(Star):
         self,
         sections: list[AppSection],
         publish_text: str,
+        card_kind: str,
         max_text_width: int,
         title_font: ImageFont.FreeTypeFont,
         header_font: ImageFont.FreeTypeFont,
@@ -1251,7 +1835,8 @@ class SteamUpdatePush(Star):
         if notice:
             blocks.append(RenderBlock("text", notice, body_font, muted, 12))
 
-        blocks.append(RenderBlock("text", "游戏更新日志", title_font, title_color, 18))
+        main_title = "创意工坊更新日志" if str(card_kind).strip().lower() == "workshop" else "游戏更新日志"
+        blocks.append(RenderBlock("text", main_title, title_font, title_color, 18))
 
         max_chars = int(self._cfg("content_max_chars", 800))
         max_imgs = int(self._cfg("image_max_per_item", 1))
@@ -1296,7 +1881,10 @@ class SteamUpdatePush(Star):
         header_map: dict[str, PilImage.Image],
     ) -> list[RenderBlock]:
         blocks: list[RenderBlock] = []
-        blocks.append(RenderBlock("text", f"【{sec.title}】", section_title_font, accent, 14))
+        is_workshop_sec = str(sec.appid).strip().lower().startswith("workshop")
+        if not is_workshop_sec:
+            game_name = str(sec.title or "").strip().strip("[]").strip("\u3010\u3011")
+            blocks.append(RenderBlock("text", game_name, section_title_font, accent, 14))
         if not sec.updates:
             blocks.append(RenderBlock("text", "暂无更新", body_font, muted, 16))
             header_img = header_map.get(sec.appid)
@@ -1305,23 +1893,45 @@ class SteamUpdatePush(Star):
                 blocks.append(RenderBlock("image", image=header_img, gap=14))
             return blocks
         for item in sec.updates:
-            blocks.extend(self._wrap_blocks(f"• {item.title}", body_font, body_color, max_text_width))
+            if is_workshop_sec:
+                workshop_title_font = self._load_font(section_title_font.size + 2, bold=True)
+                workshop_title = str(item.title or "").strip().strip("[]").strip("\u3010\u3011")
+                game_name = str(sec.title or "").strip().strip("[]").strip("\u3010\u3011")
+                title_blocks = self._wrap_blocks(workshop_title, workshop_title_font, accent, max_text_width)
+                if title_blocks:
+                    # Keep workshop title spacing aligned with the main log title rhythm.
+                    title_blocks[-1].gap = 18
+                    blocks.extend(title_blocks)
+                blocks.extend(self._wrap_blocks(f"\u6e38\u620f\uff1a{game_name}", body_font, body_color, max_text_width))
             summary = self._summarize_text(item.contents, max_chars)
             if summary:
                 blocks.extend(self._wrap_blocks(summary, body_font, body_color, max_text_width))
 
-            image_urls = self._extract_image_urls(item.contents)[: max(0, max_imgs)]
-            for url in image_urls:
-                img = image_map.get(url)
-                if img:
-                    img = self._scale_image(img, image_max_width, max_img_h)
-                    blocks.append(RenderBlock("image", image=img, gap=10))
+            image_urls: list[str] = []
+            if is_workshop_sec:
+                u = str(getattr(item, "image_url", "") or "").strip()
+                if u:
+                    image_urls = [u]
+            else:
+                image_urls = self._extract_image_urls(item.contents)[: max(0, max_imgs)]
+            if not is_workshop_sec:
+                for url in image_urls:
+                    img = image_map.get(url)
+                    if img:
+                        img = self._scale_image(img, image_max_width, max_img_h)
+                        blocks.append(RenderBlock("image", image=img, gap=10))
             date_text = self._format_time(item.date)
             if date_text:
                 blocks.append(RenderBlock("text", "", small_font, muted, 4))
                 blocks.append(RenderBlock("text", f"发布于：{date_text}", small_font, muted, 10))
             if item.url:
                 blocks.append(RenderBlock("text", f"{item.url}", small_font, muted, 14))
+            if is_workshop_sec:
+                for url in image_urls:
+                    img = image_map.get(url)
+                    if img:
+                        img = self._scale_image(img, image_max_width, max_img_h)
+                        blocks.append(RenderBlock("image", image=img, gap=10))
         header_img = header_map.get(sec.appid)
         if header_img:
             header_img = self._scale_image(header_img, image_max_width, max_img_h)
@@ -1428,8 +2038,61 @@ class SteamUpdatePush(Star):
     def _extract_image_urls(self, text: str) -> list[str]:
         if not text:
             return []
-        urls = re.findall(r"https?://\S+\.(?:png|jpg|jpeg|webp|gif)", text, flags=re.I)
-        return [u.rstrip(")") for u in urls]
+        urls: list[str] = []
+        ext_urls = re.findall(r"https?://\S+\.(?:png|jpg|jpeg|webp|gif)(?:\?\S+)?", text, flags=re.I)
+        for u in ext_urls:
+            candidate = u.rstrip(")")
+            if candidate and candidate not in urls:
+                urls.append(candidate)
+
+        # Steam UGC image links may not carry a file extension.
+        raw_urls = re.findall(r"https?://[^\s)]+", text, flags=re.I)
+        for u in raw_urls:
+            candidate = u.rstrip(")")
+            if not candidate or candidate in urls:
+                continue
+            lower = candidate.lower()
+            if "steamusercontent.com/ugc/" in lower:
+                urls.append(candidate)
+
+        return urls
+
+    def _news_image_cache_path(self, url: str) -> Path:
+        key = hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest()
+        return self._news_image_dir / f"{key}.bin"
+
+    def _decode_image_bytes(self, data: bytes, url: str = "") -> PilImage.Image | None:
+        if not data:
+            return None
+        if len(data) > MAX_NEWS_IMAGE_BYTES:
+            self._debug(f"image too large: {url}")
+            return None
+        try:
+            img = PilImage.open(BytesIO(data))
+            img.load()
+        except Exception as exc:
+            self._debug(f"image decode failed: {url} {exc}")
+            return None
+        if img.width * img.height > MAX_NEWS_IMAGE_PIXELS:
+            self._debug(f"image too large (pixels): {url}")
+            return None
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+        return img
+
+    def _trim_news_image_cache(self, keep: int = MAX_NEWS_IMAGE_CACHE_FILES) -> None:
+        try:
+            files = [p for p in self._news_image_dir.iterdir() if p.is_file()]
+        except Exception:
+            return
+        if len(files) <= keep:
+            return
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in files[keep:]:
+            try:
+                p.unlink()
+            except Exception:
+                pass
 
     async def _download_image(self, url: str) -> PilImage.Image | None:
         if not self._client:
@@ -1437,29 +2100,45 @@ class SteamUpdatePush(Star):
         if not self._is_allowed_image_url(url):
             self._debug(f"skip untrusted image url: {url}")
             return None
+        cache_path = self._news_image_cache_path(url)
+        if cache_path.exists():
+            try:
+                data = cache_path.read_bytes()
+                img = self._decode_image_bytes(data, url)
+                if img is not None:
+                    try:
+                        cache_path.touch()
+                    except Exception:
+                        pass
+                    return img
+                cache_path.unlink(missing_ok=True)
+            except Exception as exc:
+                self._debug(f"read image cache failed: {url} {exc}")
         try:
-            async with self._client.stream(
-                "GET", url, timeout=10, follow_redirects=False
-            ) as resp:
-                resp.raise_for_status()
-                content_type = (resp.headers.get("content-type") or "").lower()
-                if content_type and not content_type.startswith("image/"):
-                    self._debug(f"skip non-image content: {url} {content_type}")
-                    return None
-                data = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > MAX_NEWS_IMAGE_BYTES:
-                        self._debug(f"image too large: {url}")
+            resp = await self._client.get(url, timeout=10, follow_redirects=True)
+            resp.raise_for_status()
+            content_type = (resp.headers.get("content-type") or "").lower()
+            if content_type and not content_type.startswith("image/"):
+                self._debug(f"skip non-image content: {url} {content_type}")
+                return None
+            if resp.headers.get("Content-Length"):
+                try:
+                    if int(resp.headers["Content-Length"]) > MAX_NEWS_IMAGE_BYTES:
+                        self._debug(f"image too large by header: {url}")
                         return None
+                except Exception:
+                    pass
+            data = resp.content
             if not data:
                 return None
-            img = PilImage.open(BytesIO(data))
-            if img.width * img.height > MAX_NEWS_IMAGE_PIXELS:
-                self._debug(f"image too large (pixels): {url}")
+            img = self._decode_image_bytes(data, url)
+            if img is None:
                 return None
-            if img.mode not in ("RGB", "RGBA"):
-                img = img.convert("RGB")
+            try:
+                cache_path.write_bytes(data)
+                self._trim_news_image_cache()
+            except Exception as exc:
+                self._debug(f"write image cache failed: {url} {exc}")
             return img
         except Exception as exc:
             self._debug(f"image download failed: {url} {exc}")
@@ -1471,8 +2150,16 @@ class SteamUpdatePush(Star):
         urls: list[str] = []
         max_imgs = int(self._cfg("image_max_per_item", 1))
         for sec in sections:
+            is_workshop_sec = str(sec.appid).strip().lower().startswith("workshop")
             for item in sec.updates:
-                for url in self._extract_image_urls(item.contents)[: max(0, max_imgs)]:
+                candidates: list[str] = []
+                if is_workshop_sec:
+                    u = str(getattr(item, "image_url", "") or "").strip()
+                    if u:
+                        candidates.append(u)
+                else:
+                    candidates.extend(self._extract_image_urls(item.contents)[: max(0, max_imgs)])
+                for url in candidates:
                     if url not in urls:
                         urls.append(url)
 
@@ -1494,7 +2181,7 @@ class SteamUpdatePush(Star):
     async def _prefetch_app_headers(self, sections: list[AppSection]) -> dict[str, PilImage.Image]:
         if not self._client:
             return {}
-        appids = {sec.appid for sec in sections}
+        appids = {sec.appid for sec in sections if str(sec.appid).isdigit()}
         results: dict[str, PilImage.Image] = {}
         semaphore = asyncio.Semaphore(2)
 
@@ -1786,21 +2473,25 @@ class SteamUpdatePush(Star):
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def steam_updates_on_group_message(self, event: AstrMessageEvent):
-        commands = self._manual_query_commands()
+        game_commands = self._manual_game_query_commands()
+        workshop_commands = self._manual_workshop_query_commands()
         text = self._get_event_text(event)
         if text.startswith(("/", "\uFF0F")):
             text = text[1:].strip()
         if not text:
             return
-        if commands:
-            if text in commands:
-                pass
-            elif text.casefold() in {c.casefold() for c in commands}:
-                pass
-            else:
-                return
-        else:
+        is_game_cmd = self._match_command(text, game_commands)
+        is_workshop_cmd = self._match_command(text, workshop_commands)
+        if not is_game_cmd and not is_workshop_cmd:
             return
+        query_kind = "game" if is_game_cmd and not is_workshop_cmd else "workshop"
+        if is_game_cmd and is_workshop_cmd:
+            query_kind = "game"
+            self._log_warn(
+                "manual_cmd",
+                "command overlaps between game/workshop; default to game",
+                command=text,
+            )
 
         try:
             group_id = str(event.get_group_id() or "").strip()
@@ -1820,6 +2511,7 @@ class SteamUpdatePush(Star):
             "manual_cmd",
             "command matched",
             command=text,
+            query_kind=query_kind,
             group_id=group_id,
             user_id=user_id,
         )
@@ -1844,23 +2536,37 @@ class SteamUpdatePush(Star):
             yield event.plain_result("当前群未启用插件")
             return
 
-        yield event.plain_result("正在查询更新，请稍后...")
-        result, err = await self._manual_query(event.unified_msg_origin)
+        if query_kind == "workshop":
+            yield event.plain_result("\u6b63\u5728\u67e5\u8be2\u521b\u610f\u5de5\u574a\u66f4\u65b0\uff0c\u8bf7\u7a0d\u540e...")
+        else:
+            yield event.plain_result("\u6b63\u5728\u67e5\u8be2\u6e38\u620f\u66f4\u65b0\uff0c\u8bf7\u7a0d\u540e...")
+        result, err = await self._manual_query(event.unified_msg_origin, query_kind=query_kind)
         if err:
             self._log_warn("manual_cmd", "query failed", group_id=group_id, user_id=user_id, error=err)
             yield event.plain_result(err)
             return
-        if isinstance(result, bytes):
-            path = self._save_temp_image(result)
-            if path:
-                self._log_debug("manual_cmd", "reply image", group_id=group_id, user_id=user_id, path=path)
-                yield event.image_result(path)
+        payloads: list[bytes | str] = []
+        if isinstance(result, list):
+            payloads = result
+        elif result is not None:
+            payloads = [result]
+
+        if not payloads:
+            yield event.plain_result("暂无更新")
+            return
+
+        for payload in payloads:
+            if isinstance(payload, bytes):
+                path = self._save_temp_image(payload)
+                if path:
+                    self._log_debug("manual_cmd", "reply image", group_id=group_id, user_id=user_id, path=path)
+                    yield event.image_result(path)
+                else:
+                    self._log_warn("manual_cmd", "reply image failed", group_id=group_id, user_id=user_id)
+                    yield event.plain_result("图片生成失败，请稍后重试")
             else:
-                self._log_warn("manual_cmd", "reply image failed", group_id=group_id, user_id=user_id)
-                yield event.plain_result("图片生成失败，请稍后重试")
-        else:
-            self._log_debug("manual_cmd", "reply text", group_id=group_id, user_id=user_id)
-            yield event.plain_result(result or "暂无更新")
+                self._log_debug("manual_cmd", "reply text", group_id=group_id, user_id=user_id)
+                yield event.plain_result(str(payload) or "暂无更新")
 
 
 

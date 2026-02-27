@@ -2,6 +2,14 @@
 
 本文档记录 `astrbot_plugin_steam_updates` 的版本变更。
 
+## v1.2.4
+
+### 变更
+- 新增创意工坊查询功能，支持多ID查询，自动轮询和手动查询。
+
+<details>
+<summary>历史版本（点击展开）</summary>
+
 ## v1.2.3
 
 ### 修复
@@ -10,9 +18,6 @@
 
 ### 优化
 - 统一 `_push_text`、`_push_image`、`_push_chain` 返回值语义，明确推送成功状态，便于轮询分支做失败处理。
-
-<details>
-<summary>历史版本（点击展开）</summary>
 
 ## v1.2.2
 

@@ -50,6 +50,39 @@
       "type": "string"
     }
   },
+  "workshop_enable": {
+    "description": "启用创意工坊订阅监控",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后会轮询 workshop_item_ids 并在有更新时推送"
+  },
+  "workshop_item_ids": {
+    "description": "创意工坊订阅ID列表",
+    "type": "list",
+    "default": [],
+    "hint": "填写 PublishedFileID，可配置多个",
+    "items": {
+      "type": "string"
+    }
+  },
+  "workshop_api_base": {
+    "description": "创意工坊API基础地址",
+    "type": "string",
+    "default": "https://api.steampowered.com",
+    "hint": "默认即可，一般无需修改"
+  },
+  "workshop_timeout_sec": {
+    "description": "创意工坊请求超时(秒)",
+    "type": "int",
+    "default": 10,
+    "hint": "建议范围 3-60"
+  },
+  "workshop_push_on_first_seen": {
+    "description": "首次发现即推送创意工坊条目",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时首次仅记录基线，不推送；后续有变更才推送"
+  },
   "steam_lang": {
     "description": "语言",
     "type": "string",
@@ -92,13 +125,24 @@
     ],
     "hint": "card 为图片卡片，text 为文本"
   },
-  "manual_query_command": {
-    "description": "手动查询指令（可配置多个）",
+  "manual_query_game_command": {
+    "description": "游戏更新手动查询指令（可配置多个）",
     "type": "list",
     "default": [
       "STEAM更新"
     ],
-    "hint": "群内发送任一指令可触发手动查询",
+    "hint": "群内发送任一指令可触发游戏更新手动查询",
+    "items": {
+      "type": "string"
+    }
+  },
+  "manual_query_workshop_command": {
+    "description": "创意工坊手动查询指令（可配置多个）",
+    "type": "list",
+    "default": [
+      "创意工坊更新"
+    ],
+    "hint": "群内发送任一指令可触发创意工坊手动查询",
     "items": {
       "type": "string"
     }
