@@ -79,7 +79,8 @@ AstrBot WebUI -> 插件 -> 插件配置
 | manual_query_game_command | 游戏更新手动查询指令（可配置多个） |
 | manual_query_workshop_command | 创意工坊手动查询指令（可配置多个） |
 | content_process_mode | 内容处理方式：`plugin` / `llm` |
-| llm_provider_id | LLM 提供商ID（可选） |
+| llm_provider_id | LLM 提供商ID（可选，WebUI下拉选择） |
+| llm_timeout_sec | LLM 请求超时秒数（默认 `20`） |
 | llm_prompt | LLM 提示词（仅 llm 模式生效） |
 | max_days | 每个游戏最多展示最近 N 天更新 |
 | content_max_chars | 单游戏正文最大字符数 |

@@ -161,7 +161,14 @@
     "description": "LLM 提供商ID",
     "type": "string",
     "default": "",
+    "_special": "select_provider",
     "hint": "留空自动使用当前会话/默认模型；可在日志查看可用ID"
+  },
+  "llm_timeout_sec": {
+    "description": "LLM 请求超时(秒)",
+    "type": "int",
+    "default": 20,
+    "hint": "建议范围 5-120，超时后回退到插件模式"
   },
   "llm_prompt": {
     "description": "LLM 提示词",
@@ -190,10 +197,10 @@
     "default": 320
   },
   "enable_app_headers": {
-    "description": "启用游戏头图渲染",
+    "description": "启用封面图渲染",
     "type": "bool",
     "default": true,
-    "hint": "关闭后不再请求游戏头图，查询速度更快"
+    "hint": "关闭后不再请求封面图，查询速度更快"
   },
   "image_download_timeout_sec": {
     "description": "内容图片下载超时(秒)",

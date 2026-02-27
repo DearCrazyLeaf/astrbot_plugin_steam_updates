@@ -1037,6 +1037,112 @@ class SteamUpdatePush(Star):
                 return ts
         return 0
 
+    @staticmethod
+    def _parse_steamcommunity_author_path(path: str) -> str:
+        p = str(path or "").strip().lstrip("/")
+        if p.startswith("profiles/"):
+            return p.split("/", 1)[1].strip()
+        if p.startswith("id/"):
+            return p.split("/", 1)[1].strip()
+        return ""
+
+    def _extract_workshop_author_from_item_page(self, page_text: str) -> str:
+        if not page_text:
+            return ""
+        m = re.search(
+            r"Created by[\s\S]{0,800}?href=[\"']https?://steamcommunity\.com/(?P<path>(?:profiles/\d{17}|id/[A-Za-z0-9_\-]+))",
+            page_text,
+            flags=re.I,
+        )
+        if m:
+            return self._parse_steamcommunity_author_path(m.group("path"))
+        m = re.search(
+            r"href=[\"']https?://steamcommunity\.com/(?P<path>(?:profiles/\d{17}|id/[A-Za-z0-9_\-]+))",
+            page_text,
+            flags=re.I,
+        )
+        if m:
+            return self._parse_steamcommunity_author_path(m.group("path"))
+        return ""
+
+    def _extract_workshop_changelog_note(self, page_text: str) -> str:
+        if not page_text:
+            return ""
+        lower = page_text.lower()
+        idx = lower.find("workshopannouncement")
+        if idx < 0:
+            return ""
+        chunk = page_text[idx : idx + 8000]
+        m = re.search(r"<p[^>]*>(?P<note>.*?)</p>", chunk, flags=re.I | re.S)
+        if not m:
+            return ""
+        return self._strip_html_text(m.group("note"))
+
+    def _extract_workshop_author_from_changelog_page(self, page_text: str) -> str:
+        if not page_text:
+            return ""
+        lower = page_text.lower()
+        idx = lower.find("workshopannouncement")
+        if idx < 0:
+            return ""
+        chunk = page_text[idx : idx + 4000]
+        m = re.search(
+            r"changelog author[\s\S]{0,500}?href=[\"']https?://steamcommunity\.com/(?P<path>(?:profiles/\d{17}|id/[A-Za-z0-9_\-]+))",
+            chunk,
+            flags=re.I,
+        )
+        if not m:
+            return ""
+        return self._parse_steamcommunity_author_path(m.group("path"))
+
+    def _build_workshop_content(self, workshop_id: str, author: str, ts: int, change_text: str) -> str:
+        lines = [f"ID: {workshop_id}"]
+        if author:
+            lines.append(f"作者ID: {author}")
+        lines.append(f"更新时间: {self._format_time(ts)}")
+        lines.append(f"改动: {change_text or '暂无'}")
+        return "\n".join(lines)
+
+    def _extract_workshop_author_from_contents(self, contents: str) -> str:
+        if not contents:
+            return ""
+        m = re.search(r"作者ID:\s*(.+)", contents)
+        return m.group(1).strip() if m else ""
+
+    async def _fetch_workshop_changelog_meta(self, workshop_id: str) -> tuple[str, str]:
+        if not self._client or not workshop_id:
+            return "", ""
+        url = f"https://steamcommunity.com/sharedfiles/filedetails/changelog/{workshop_id}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        attempts = self._workshop_url_retry_attempts()
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = await self._request_with_network_fallback(
+                    "GET",
+                    url,
+                    headers=headers,
+                    timeout=self._workshop_timeout_sec(),
+                    follow_redirects=True,
+                )
+                resp.raise_for_status()
+                text = resp.text
+                note = self._extract_workshop_changelog_note(text)
+                author = self._extract_workshop_author_from_changelog_page(text)
+                return note, author
+            except Exception as exc:
+                last_exc = exc
+                if attempt < attempts:
+                    await asyncio.sleep(0.4 * attempt)
+                continue
+        self._log_warn(
+            "workshop_changelog",
+            "changelog request failed",
+            workshop_id=workshop_id,
+            error=self._exc_text(last_exc),
+        )
+        return "", ""
+
     def _workshop_page_to_news(
         self,
         workshop_id: str,
@@ -1079,15 +1185,8 @@ class SteamUpdatePush(Star):
                 appid = str(m.group("id")).strip()
                 break
 
-        # Author
-        author = ""
-        author_match = re.search(r"/profiles/(?P<id>\d{17})", page_text, flags=re.I)
-        if author_match:
-            author = author_match.group("id").strip()
-        else:
-            author_match = re.search(r"/id/(?P<id>[A-Za-z0-9_\-]+)/?", page_text, flags=re.I)
-            if author_match:
-                author = author_match.group("id").strip()
+        # URL path: use author id shown in page link.
+        author = self._extract_workshop_author_from_item_page(page_text)
 
         # Updated timestamp
         ts = self._extract_workshop_timestamp(page_text)
@@ -1118,7 +1217,7 @@ class SteamUpdatePush(Star):
             gid=f"{workshop_id}:{ts}",
             title=title,
             url=item_url,
-            contents="\n".join(content_lines),
+            contents=self._build_workshop_content(workshop_id, author, ts, ""),
             date=ts,
             appid=appid,
             image_url=image_url,
@@ -1191,7 +1290,7 @@ class SteamUpdatePush(Star):
             gid=f"{workshop_id}:{ts}",
             title=title,
             url=url,
-            contents="\n".join(content_lines),
+            contents=self._build_workshop_content(workshop_id, author, ts, ""),
             date=ts,
             appid=appid,
             image_url=preview_url,
@@ -1214,11 +1313,13 @@ class SteamUpdatePush(Star):
         url_network_unreachable = False
         for workshop_id in item_ids:
             news: NewsItem | None = None
+            from_api = False
 
             detail = detail_map.get(workshop_id)
             if detail:
                 news = self._workshop_item_to_news(detail)
                 if news:
+                    from_api = True
                     self._log_debug("workshop", "api hit", workshop_id=workshop_id)
                 else:
                     self._log_warn("workshop", "api miss, fallback to url", workshop_id=workshop_id)
@@ -1234,6 +1335,15 @@ class SteamUpdatePush(Star):
                         url_network_unreachable = True
 
             if news:
+                change_note_raw, url_author = await self._fetch_workshop_changelog_meta(workshop_id)
+                change_note = self._summarize_text(change_note_raw, 180) if change_note_raw else "暂无"
+                if from_api:
+                    # API path: keep official creator field.
+                    author = str(detail.get("creator") or "").strip() if isinstance(detail, dict) else ""
+                else:
+                    # URL path: use the author id shown in URL/page.
+                    author = url_author or self._extract_workshop_author_from_contents(news.contents)
+                news.contents = self._build_workshop_content(workshop_id, author, news.date, change_note)
                 items.append(news)
             else:
                 self._log_warn("workshop", "skip item after api+url miss", workshop_id=workshop_id)
