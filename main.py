@@ -98,6 +98,7 @@ class SteamUpdatePush(Star):
         self._trace_seq = 0
         self._image_fail_until: dict[str, float] = {}
         self._header_fail_until: dict[str, float] = {}
+        self._last_workshop_url_network_error = False
 
     # --- lifecycle ---
     async def initialize(self):
@@ -307,6 +308,27 @@ class SteamUpdatePush(Star):
         except Exception:
             timeout = 10
         return max(3, min(timeout, 60))
+
+    def _workshop_api_retry_attempts(self) -> int:
+        try:
+            value = int(self._cfg("workshop_api_retry_attempts", 2))
+        except Exception:
+            value = 2
+        return max(1, min(value, 5))
+
+    def _workshop_url_retry_attempts(self) -> int:
+        try:
+            value = int(self._cfg("workshop_url_retry_attempts", 2))
+        except Exception:
+            value = 2
+        return max(1, min(value, 5))
+
+    def _llm_timeout_sec(self) -> int:
+        try:
+            value = int(self._cfg("llm_timeout_sec", 20))
+        except Exception:
+            value = 20
+        return max(5, min(value, 180))
 
     def _workshop_push_on_first_seen(self) -> bool:
         return bool(self._cfg("workshop_push_on_first_seen", False))
@@ -865,7 +887,7 @@ class SteamUpdatePush(Star):
         if not item_ids:
             return []
 
-        async def _request(ids: list[str]) -> list[dict[str, Any]] | None:
+        async def _request(ids: list[str]) -> tuple[list[dict[str, Any]] | None, Exception | None]:
             url = f"{self._workshop_api_base()}{STEAM_WORKSHOP_DETAILS_API}"
             data: dict[str, Any] = {"itemcount": len(ids)}
             for i, item_id in enumerate(ids):
@@ -874,7 +896,8 @@ class SteamUpdatePush(Star):
             if api_key:
                 data["key"] = api_key
             last_exc: Exception | None = None
-            for attempt in range(1, 4):
+            attempts = self._workshop_api_retry_attempts()
+            for attempt in range(1, attempts + 1):
                 try:
                     resp = await self._request_with_network_fallback(
                         "POST",
@@ -885,10 +908,10 @@ class SteamUpdatePush(Star):
                     resp.raise_for_status()
                     payload = resp.json()
                     details = payload.get("response", {}).get("publishedfiledetails", []) or []
-                    return [item for item in details if isinstance(item, dict)]
+                    return [item for item in details if isinstance(item, dict)], None
                 except Exception as exc:
                     last_exc = exc
-                    if attempt < 3:
+                    if attempt < attempts:
                         await asyncio.sleep(0.6 * attempt)
                     continue
             self._log_warn(
@@ -896,11 +919,11 @@ class SteamUpdatePush(Star):
                 "details request failed",
                 error=self._exc_text(last_exc),
                 count=len(ids),
-                attempts=3,
+                attempts=attempts,
             )
-            return None
+            return None, last_exc
 
-        batch = await _request(item_ids)
+        batch, batch_err = await _request(item_ids)
         if batch is not None:
             self._log_debug("workshop", "details request ok", count=len(batch), mode="batch")
             return batch
@@ -908,10 +931,15 @@ class SteamUpdatePush(Star):
         if len(item_ids) <= 1:
             return []
 
+        # If network itself is unreachable, per-ID fallback usually only adds long delay.
+        if isinstance(batch_err, httpx.RequestError | httpx.TimeoutException):
+            self._log_warn("workshop", "skip single fallback due network error", count=len(item_ids))
+            return []
+
         # Fallback: query each ID independently to avoid one bad item affecting all.
         merged: list[dict[str, Any]] = []
         for item_id in item_ids:
-            single = await _request([item_id])
+            single, _ = await _request([item_id])
             if single:
                 merged.extend(single)
         self._log_debug("workshop", "details request fallback done", count=len(merged), mode="single")
@@ -1098,10 +1126,12 @@ class SteamUpdatePush(Star):
     async def _fetch_workshop_detail_by_url(self, workshop_id: str) -> NewsItem | None:
         if not self._client or not workshop_id:
             return None
+        self._last_workshop_url_network_error = False
         item_url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}&l=english"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         last_exc: Exception | None = None
-        for attempt in range(1, 4):
+        attempts = self._workshop_url_retry_attempts()
+        for attempt in range(1, attempts + 1):
             try:
                 resp = await self._request_with_network_fallback(
                     "GET",
@@ -1119,9 +1149,11 @@ class SteamUpdatePush(Star):
                 return news
             except Exception as exc:
                 last_exc = exc
-                if attempt < 3:
+                if attempt < attempts:
                     await asyncio.sleep(0.6 * attempt)
                 continue
+        if isinstance(last_exc, httpx.RequestError | httpx.TimeoutException):
+            self._last_workshop_url_network_error = True
         self._log_warn("workshop_url", "url fallback failed", workshop_id=workshop_id, error=self._exc_text(last_exc))
         return None
 
@@ -1178,6 +1210,7 @@ class SteamUpdatePush(Star):
                 detail_map[workshop_id] = detail
 
         items: list[NewsItem] = []
+        url_network_unreachable = False
         for workshop_id in item_ids:
             news: NewsItem | None = None
 
@@ -1192,7 +1225,12 @@ class SteamUpdatePush(Star):
                 self._log_warn("workshop", "api miss, fallback to url", workshop_id=workshop_id)
 
             if not news:
-                news = await self._fetch_workshop_detail_by_url(workshop_id)
+                if url_network_unreachable:
+                    self._log_warn("workshop", "skip url fallback due previous network timeout", workshop_id=workshop_id)
+                else:
+                    news = await self._fetch_workshop_detail_by_url(workshop_id)
+                    if news is None and self._last_workshop_url_network_error:
+                        url_network_unreachable = True
 
             if news:
                 items.append(news)
@@ -1634,13 +1672,31 @@ class SteamUpdatePush(Star):
             return None
         max_chars = int(self._cfg("content_max_chars", 800))
         max_tokens = min(2048, max(256, max_chars * 2))
+        t0 = time.perf_counter()
         try:
-            resp = await self.context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                temperature=0.2,
+            resp = await asyncio.wait_for(
+                self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=0.2,
+                ),
+                timeout=self._llm_timeout_sec(),
             )
+            self._log_debug(
+                "llm",
+                "generate ok",
+                provider_id=provider_id,
+                ms=int((time.perf_counter() - t0) * 1000),
+            )
+        except asyncio.TimeoutError:
+            self._log_warn(
+                "llm",
+                "request timeout, fallback to plugin mode",
+                provider_id=provider_id,
+                timeout_sec=self._llm_timeout_sec(),
+            )
+            return None
         except Exception as exc:
             self._debug(f"llm request failed: {exc}")
             return None
