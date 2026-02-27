@@ -75,6 +75,18 @@ class RenderBlock:
 
 
 class SteamUpdatePush(Star):
+    _CFG_GROUP_KEYS = (
+        "basic_settings",
+        "game_updates",
+        "workshop_updates",
+        "manual_commands",
+        "polling_settings",
+        "network_proxy",
+        "content_processing",
+        "rendering_and_performance",
+        "debug_settings",
+    )
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -117,7 +129,19 @@ class SteamUpdatePush(Star):
     # --- config helpers ---
     def _cfg(self, key: str, default: Any = None) -> Any:
         try:
-            return self.config.get(key, default)
+            value = self.config.get(key, None)
+            if value is not None:
+                return value
+
+            # Support grouped config schema in WebUI while keeping backward
+            # compatibility with legacy flat-key configs.
+            for group_key in self._CFG_GROUP_KEYS:
+                group_value = self.config.get(group_key, None)
+                if isinstance(group_value, dict):
+                    nested = group_value.get(key, None)
+                    if nested is not None:
+                        return nested
+            return default
         except Exception:
             return default
 

@@ -1,241 +1,303 @@
 {
-  "enable_push": {
-    "description": "启用插件",
-    "type": "bool",
-    "default": true
-  },
-  "steam_web_api_key": {
-    "description": "Steam Web API Key",
-    "type": "string",
-    "default": "",
-    "hint": "可选，留空也可使用 Steam News API"
-  },
-  "enable_feed_fallback": {
-    "description": "启用 Steam Feed 回退",
-    "type": "bool",
-    "default": true,
-    "hint": "当 Steam News API 失败或无数据时，自动回退到 Steam 商店 Feed"
-  },
-  "feed_timeout_sec": {
-    "description": "Feed 回退请求超时(秒)",
-    "type": "int",
-    "default": 10,
-    "hint": "仅在启用回退时生效，建议范围 3-60"
-  },
-  "proxy_mode": {
-    "description": "代理模式",
-    "type": "string",
-    "default": "system",
-    "options": [
-      "off",
-      "system",
-      "custom"
-    ],
-    "hint": "off=禁用代理，system=使用系统环境变量，custom=使用下方代理地址"
-  },
-  "proxy_url": {
-    "description": "自定义代理地址",
-    "type": "string",
-    "default": "",
-    "hint": "示例：http://127.0.0.1:7890 或 socks5://127.0.0.1:7890（仅 proxy_mode=custom 生效）"
-  },
-  "steam_appids": {
-    "description": "AppID 列表",
-    "type": "list",
-    "default": [
-      "730"
-    ],
-    "hint": "支持多个 AppID，例如 730, 570",
+  "basic_settings": {
+    "description": "基础设置",
+    "type": "object",
+    "hint": "插件开关、目标群与消息展示方式",
     "items": {
-      "type": "string"
+      "enable_push": {
+        "description": "启用插件",
+        "type": "bool",
+        "default": true
+      },
+      "notify_group_ids": {
+        "description": "推送群号列表",
+        "type": "list",
+        "default": [],
+        "hint": "仅列表内群会接收推送",
+        "items": {
+          "type": "string"
+        }
+      },
+      "platform_id": {
+        "description": "平台 ID（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "例如 chatbot2；不填则需先发送 steam_update_ping 以捕获平台"
+      },
+      "message_mode": {
+        "description": "消息模式",
+        "type": "string",
+        "default": "card",
+        "options": [
+          "card",
+          "text"
+        ],
+        "hint": "card 为图片卡片，text 为文本"
+      },
+      "steam_lang": {
+        "description": "语言",
+        "type": "string",
+        "default": "schinese",
+        "hint": "例如 schinese / english / japanese"
+      }
     }
   },
-  "workshop_enable": {
-    "description": "启用创意工坊订阅监控",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后会轮询 workshop_item_ids 并在有更新时推送"
-  },
-  "workshop_item_ids": {
-    "description": "创意工坊订阅ID列表",
-    "type": "list",
-    "default": [],
-    "hint": "填写 PublishedFileID，可配置多个",
+  "game_updates": {
+    "description": "游戏更新查询",
+    "type": "object",
+    "hint": "Steam 游戏新闻轮询与回退策略",
     "items": {
-      "type": "string"
+      "steam_appids": {
+        "description": "AppID 列表",
+        "type": "list",
+        "default": [
+          "730"
+        ],
+        "hint": "支持多个 AppID，例如 730, 570",
+        "items": {
+          "type": "string"
+        }
+      },
+      "max_days": {
+        "description": "每个游戏最多展示最近 N 天更新",
+        "type": "int",
+        "default": 1
+      },
+      "steam_web_api_key": {
+        "description": "Steam Web API Key",
+        "type": "string",
+        "default": "",
+        "hint": "可选，留空也可使用 Steam News API"
+      },
+      "enable_feed_fallback": {
+        "description": "启用 Steam Feed 回退",
+        "type": "bool",
+        "default": true,
+        "hint": "当 Steam News API 失败或无数据时，自动回退到 Steam 商店 Feed"
+      },
+      "feed_timeout_sec": {
+        "description": "Feed 回退请求超时(秒)",
+        "type": "int",
+        "default": 10,
+        "hint": "仅在启用回退时生效，建议范围 3-60"
+      }
     }
   },
-  "workshop_api_base": {
-    "description": "创意工坊API基础地址",
-    "type": "string",
-    "default": "https://api.steampowered.com",
-    "hint": "默认即可，一般无需修改"
-  },
-  "workshop_timeout_sec": {
-    "description": "创意工坊请求超时(秒)",
-    "type": "int",
-    "default": 10,
-    "hint": "建议范围 3-60"
-  },
-  "workshop_push_on_first_seen": {
-    "description": "首次发现即推送创意工坊条目",
-    "type": "bool",
-    "default": false,
-    "hint": "关闭时首次仅记录基线，不推送；后续有变更才推送"
-  },
-  "steam_lang": {
-    "description": "语言",
-    "type": "string",
-    "default": "schinese",
-    "hint": "例如 schinese / english / japanese"
-  },
-  "poll_interval_sec": {
-    "description": "轮询间隔(秒，从起始时间计时)",
-    "type": "int",
-    "default": 600
-  },
-  "poll_start_time": {
-    "description": "轮询起始时间",
-    "type": "string",
-    "default": "06:00",
-    "hint": "24小时制 HH:MM，从该时间点开始按间隔轮询"
-  },
-  "notify_group_ids": {
-    "description": "推送群号列表",
-    "type": "list",
-    "default": [],
-    "hint": "仅列表内群会接收推送",
+  "workshop_updates": {
+    "description": "创意工坊更新查询",
+    "type": "object",
+    "hint": "订阅物品更新轮询与推送策略",
     "items": {
-      "type": "string"
+      "workshop_enable": {
+        "description": "启用创意工坊订阅监控",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后会轮询 workshop_item_ids 并在有更新时推送"
+      },
+      "workshop_item_ids": {
+        "description": "创意工坊订阅ID列表",
+        "type": "list",
+        "default": [],
+        "hint": "填写 PublishedFileID，可配置多个",
+        "items": {
+          "type": "string"
+        }
+      },
+      "workshop_api_base": {
+        "description": "创意工坊API基础地址",
+        "type": "string",
+        "default": "https://api.steampowered.com",
+        "hint": "默认即可，一般无需修改"
+      },
+      "workshop_timeout_sec": {
+        "description": "创意工坊请求超时(秒)",
+        "type": "int",
+        "default": 10,
+        "hint": "建议范围 3-60"
+      },
+      "workshop_push_on_first_seen": {
+        "description": "首次发现即推送创意工坊条目",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时首次仅记录基线不推送，后续变更才推送"
+      }
     }
   },
-  "platform_id": {
-    "description": "平台 ID（可选）",
-    "type": "string",
-    "default": "",
-    "hint": "如 chatbot2，不填则需先发送 steam_update_ping 以捕获平台"
-  },
-  "message_mode": {
-    "description": "消息模式",
-    "type": "string",
-    "default": "card",
-    "options": [
-      "card",
-      "text"
-    ],
-    "hint": "card 为图片卡片，text 为文本"
-  },
-  "manual_query_game_command": {
-    "description": "游戏更新手动查询指令（可配置多个）",
-    "type": "list",
-    "default": [
-      "STEAM更新"
-    ],
-    "hint": "群内发送任一指令可触发游戏更新手动查询",
+  "manual_commands": {
+    "description": "手动查询指令",
+    "type": "object",
+    "hint": "群聊触发查询时使用的命令关键字",
     "items": {
-      "type": "string"
+      "manual_query_game_command": {
+        "description": "游戏更新手动查询指令（可配置多个）",
+        "type": "list",
+        "default": [
+          "STEAM更新"
+        ],
+        "hint": "群内发送任一指令可触发游戏更新手动查询",
+        "items": {
+          "type": "string"
+        }
+      },
+      "manual_query_workshop_command": {
+        "description": "创意工坊手动查询指令（可配置多个）",
+        "type": "list",
+        "default": [
+          "创意工坊更新"
+        ],
+        "hint": "群内发送任一指令可触发创意工坊手动查询",
+        "items": {
+          "type": "string"
+        }
+      }
     }
   },
-  "manual_query_workshop_command": {
-    "description": "创意工坊手动查询指令（可配置多个）",
-    "type": "list",
-    "default": [
-      "创意工坊更新"
-    ],
-    "hint": "群内发送任一指令可触发创意工坊手动查询",
+  "polling_settings": {
+    "description": "轮询计划",
+    "type": "object",
+    "hint": "从起始时间开始按固定间隔轮询",
     "items": {
-      "type": "string"
+      "poll_start_time": {
+        "description": "轮询起始时间",
+        "type": "string",
+        "default": "06:00",
+        "hint": "24小时制 HH:MM，从该时间点开始按间隔轮询"
+      },
+      "poll_interval_sec": {
+        "description": "轮询间隔(秒，从起始时间计时)",
+        "type": "int",
+        "default": 600
+      }
     }
   },
-  "content_process_mode": {
-    "description": "内容处理方式",
-    "type": "string",
-    "default": "plugin",
-    "options": [
-      "plugin",
-      "llm"
-    ],
-    "hint": "plugin 使用插件内置处理，llm 使用大模型整理"
+  "network_proxy": {
+    "description": "网络与代理",
+    "type": "object",
+    "hint": "用于 Steam API / 社区链接访问的代理设置",
+    "items": {
+      "proxy_mode": {
+        "description": "代理模式",
+        "type": "string",
+        "default": "system",
+        "options": [
+          "off",
+          "system",
+          "custom"
+        ],
+        "hint": "off=禁用代理，system=使用系统环境变量，custom=使用下方代理地址"
+      },
+      "proxy_url": {
+        "description": "自定义代理地址",
+        "type": "string",
+        "default": "",
+        "hint": "示例：http://127.0.0.1:7890 或 socks5://127.0.0.1:7890（仅 proxy_mode=custom 生效）"
+      }
+    }
   },
-  "llm_provider_id": {
-    "description": "LLM 提供商ID",
-    "type": "string",
-    "default": "",
-    "_special": "select_provider",
-    "hint": "留空自动使用当前会话/默认模型；可在日志查看可用ID"
+  "content_processing": {
+    "description": "内容处理（插件/LLM）",
+    "type": "object",
+    "hint": "控制内容清洗、模型处理与文本长度",
+    "items": {
+      "content_process_mode": {
+        "description": "内容处理方式",
+        "type": "string",
+        "default": "plugin",
+        "options": [
+          "plugin",
+          "llm"
+        ],
+        "hint": "plugin 使用插件内置处理，llm 使用大模型整理"
+      },
+      "llm_provider_id": {
+        "description": "LLM 提供商ID",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空自动使用当前会话/默认模型；在 WebUI 中可下拉选择"
+      },
+      "llm_timeout_sec": {
+        "description": "LLM 请求超时(秒)",
+        "type": "int",
+        "default": 20,
+        "hint": "建议范围 5-120，超时后回退到插件模式"
+      },
+      "llm_prompt": {
+        "description": "LLM 提示词",
+        "type": "text",
+        "default": "你是Steam游戏更新日志整理助手。请根据输入内容使用 {lang} 语言输出整理结果，如果语言已经是 {lang} 则仅编排格式后输出：\n- 保留结构与条目\n- 使用 [分类] 作为小节标题\n- 去除无意义符号与重复\n- 不要输出游戏名称仅更新内容\n- 不要输出Markdown代码块，不要带句号\n- 不要输出游戏信息和更新时间以及发布链接\n- 输出长度不超过 {max_chars} 字\n- 保持静默思考，不要把你的转化内容发送出来，避免被当作聊天回复处理\n\n【输入】\n{content}",
+        "hint": "支持变量：{app_name} {appid} {lang} {max_chars} {content}"
+      },
+      "content_max_chars": {
+        "description": "正文最大字符数(单游戏)",
+        "type": "int",
+        "default": 800
+      }
+    }
   },
-  "llm_timeout_sec": {
-    "description": "LLM 请求超时(秒)",
-    "type": "int",
-    "default": 20,
-    "hint": "建议范围 5-120，超时后回退到插件模式"
+  "rendering_and_performance": {
+    "description": "渲染与性能",
+    "type": "object",
+    "hint": "图片渲染长度、下载超时、并发与冷却",
+    "items": {
+      "image_max_per_item": {
+        "description": "每条更新最多渲染图片数",
+        "type": "int",
+        "default": 10
+      },
+      "image_max_height": {
+        "description": "图片最大高度(px)",
+        "type": "int",
+        "default": 320
+      },
+      "enable_app_headers": {
+        "description": "启用封面图渲染",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不再请求封面图，查询速度更快"
+      },
+      "image_download_timeout_sec": {
+        "description": "内容图片下载超时(秒)",
+        "type": "int",
+        "default": 6,
+        "hint": "建议范围 2-20，网络不稳定时可适当调小以减少等待"
+      },
+      "header_download_timeout_sec": {
+        "description": "游戏头图下载超时(秒)",
+        "type": "int",
+        "default": 6,
+        "hint": "建议范围 2-20，失败会进入冷却并跳过重复请求"
+      },
+      "prefetch_image_concurrency": {
+        "description": "内容图片预取并发数",
+        "type": "int",
+        "default": 3,
+        "hint": "建议范围 1-8，带宽较差时可调小"
+      },
+      "prefetch_header_concurrency": {
+        "description": "头图预取并发数",
+        "type": "int",
+        "default": 2,
+        "hint": "建议范围 1-6，过高可能导致网络拥塞"
+      },
+      "failed_download_cooldown_sec": {
+        "description": "下载失败冷却时间(秒)",
+        "type": "int",
+        "default": 1800,
+        "hint": "同一URL/AppID下载失败后，在冷却期内跳过重复请求"
+      }
+    }
   },
-  "llm_prompt": {
-    "description": "LLM 提示词",
-    "type": "text",
-    "default": "你是Steam游戏更新日志整理助手。请根据输入内容使用 {lang} 语言输出整理结果，如果语言已经是 {lang} 则仅编排格式后输出：\n- 保留结构与条目\n- 使用 [分类] 作为小节标题\n- 去除无意义符号与重复\n- n不要输出游戏名称仅更新内容\n- 不要输出Markdown代码块，不要带句号\n- 不要输出游戏信息和更新时间以及发布链接\n- 输出长度不超过 {max_chars} 字\n- 保持静默思考，不要把你的转化内容发送出来，避免被当作聊天回复处理\n\n【输入】\n{content}",
-    "hint": "支持变量：{app_name} {appid} {lang} {max_chars} {content}"
-  },
-  "max_days": {
-    "description": "每个游戏最多展示最近 N 天更新",
-    "type": "int",
-    "default": 1
-  },
-  "content_max_chars": {
-    "description": "正文最大字符数(单游戏)",
-    "type": "int",
-    "default": 800
-  },
-  "image_max_per_item": {
-    "description": "每条更新最多渲染图片数",
-    "type": "int",
-    "default": 10
-  },
-  "image_max_height": {
-    "description": "图片最大高度(px)",
-    "type": "int",
-    "default": 320
-  },
-  "enable_app_headers": {
-    "description": "启用封面图渲染",
-    "type": "bool",
-    "default": true,
-    "hint": "关闭后不再请求封面图，查询速度更快"
-  },
-  "image_download_timeout_sec": {
-    "description": "内容图片下载超时(秒)",
-    "type": "int",
-    "default": 6,
-    "hint": "建议范围 2-20，网络不稳定时可适当调小以减少等待"
-  },
-  "header_download_timeout_sec": {
-    "description": "游戏头图下载超时(秒)",
-    "type": "int",
-    "default": 6,
-    "hint": "建议范围 2-20，失败会进入冷却并跳过重复请求"
-  },
-  "prefetch_image_concurrency": {
-    "description": "内容图片预取并发数",
-    "type": "int",
-    "default": 3,
-    "hint": "建议范围 1-8，带宽较差时可调小"
-  },
-  "prefetch_header_concurrency": {
-    "description": "头图预取并发数",
-    "type": "int",
-    "default": 2,
-    "hint": "建议范围 1-6，过高可能导致网络拥塞"
-  },
-  "failed_download_cooldown_sec": {
-    "description": "下载失败冷却时间(秒)",
-    "type": "int",
-    "default": 1800,
-    "hint": "同一URL/AppID下载失败后，在冷却期间内跳过重复请求"
-  },
-  "debug_log": {
-    "description": "Enable debug logs (console)",
-    "type": "bool",
-    "default": false,
-    "hint": "Prints structured logs in AstrBot console only, no extra log file"
+  "debug_settings": {
+    "description": "调试设置",
+    "type": "object",
+    "items": {
+      "debug_log": {
+        "description": "输出调试日志",
+        "type": "bool",
+        "default": false,
+        "hint": "仅输出到 AstrBot 控制台，不生成额外日志文件"
+      }
+    }
   }
 }
