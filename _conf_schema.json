@@ -189,6 +189,42 @@
     "type": "int",
     "default": 320
   },
+  "enable_app_headers": {
+    "description": "启用游戏头图渲染",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后不再请求游戏头图，查询速度更快"
+  },
+  "image_download_timeout_sec": {
+    "description": "内容图片下载超时(秒)",
+    "type": "int",
+    "default": 6,
+    "hint": "建议范围 2-20，网络不稳定时可适当调小以减少等待"
+  },
+  "header_download_timeout_sec": {
+    "description": "游戏头图下载超时(秒)",
+    "type": "int",
+    "default": 6,
+    "hint": "建议范围 2-20，失败会进入冷却并跳过重复请求"
+  },
+  "prefetch_image_concurrency": {
+    "description": "内容图片预取并发数",
+    "type": "int",
+    "default": 3,
+    "hint": "建议范围 1-8，带宽较差时可调小"
+  },
+  "prefetch_header_concurrency": {
+    "description": "头图预取并发数",
+    "type": "int",
+    "default": 2,
+    "hint": "建议范围 1-6，过高可能导致网络拥塞"
+  },
+  "failed_download_cooldown_sec": {
+    "description": "下载失败冷却时间(秒)",
+    "type": "int",
+    "default": 1800,
+    "hint": "同一URL/AppID下载失败后，在冷却期间内跳过重复请求"
+  },
   "debug_log": {
     "description": "Enable debug logs (console)",
     "type": "bool",

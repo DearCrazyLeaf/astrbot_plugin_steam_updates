@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import time
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
@@ -94,6 +95,8 @@ class SteamUpdatePush(Star):
         self._name_cache: dict[str, str] | None = None
         self._name_cache_path = self._data_dir / "app_name_cache.json"
         self._trace_seq = 0
+        self._image_fail_until: dict[str, float] = {}
+        self._header_fail_until: dict[str, float] = {}
 
     # --- lifecycle ---
     async def initialize(self):
@@ -240,6 +243,71 @@ class SteamUpdatePush(Star):
 
     def _workshop_push_on_first_seen(self) -> bool:
         return bool(self._cfg("workshop_push_on_first_seen", False))
+
+    def _news_image_timeout_sec(self) -> int:
+        try:
+            timeout = int(self._cfg("image_download_timeout_sec", 6))
+        except Exception:
+            timeout = 6
+        return max(2, min(timeout, 20))
+
+    def _header_download_timeout_sec(self) -> int:
+        try:
+            timeout = int(self._cfg("header_download_timeout_sec", 6))
+        except Exception:
+            timeout = 6
+        return max(2, min(timeout, 20))
+
+    def _prefetch_image_concurrency(self) -> int:
+        try:
+            n = int(self._cfg("prefetch_image_concurrency", 3))
+        except Exception:
+            n = 3
+        return max(1, min(n, 8))
+
+    def _prefetch_header_concurrency(self) -> int:
+        try:
+            n = int(self._cfg("prefetch_header_concurrency", 2))
+        except Exception:
+            n = 2
+        return max(1, min(n, 6))
+
+    def _enable_app_headers(self) -> bool:
+        return bool(self._cfg("enable_app_headers", True))
+
+    def _failed_download_cooldown_sec(self) -> int:
+        try:
+            n = int(self._cfg("failed_download_cooldown_sec", 1800))
+        except Exception:
+            n = 1800
+        return max(30, min(n, 86_400))
+
+    def _is_in_fail_cooldown(self, cache: dict[str, float], key: str) -> bool:
+        if not key:
+            return False
+        now = time.monotonic()
+        until = cache.get(key, 0.0)
+        if until <= now:
+            if key in cache:
+                cache.pop(key, None)
+            return False
+        return True
+
+    def _mark_fail_cooldown(self, cache: dict[str, float], key: str) -> None:
+        if not key:
+            return
+        cache[key] = time.monotonic() + float(self._failed_download_cooldown_sec())
+        # Keep the cooldown map bounded.
+        if len(cache) > 2000:
+            now = time.monotonic()
+            for k in list(cache.keys())[:1000]:
+                if cache.get(k, 0.0) <= now:
+                    cache.pop(k, None)
+
+    @staticmethod
+    def _clear_fail_cooldown(cache: dict[str, float], key: str) -> None:
+        if key in cache:
+            cache.pop(key, None)
 
     def _normalize_workshop_item_ids(self, raw_list: Any) -> list[str]:
         item_ids: list[str] = []
@@ -1633,15 +1701,33 @@ class SteamUpdatePush(Star):
         notice: str = "",
         card_kind: str = "game",
     ) -> bytes | None:
+        t0 = time.perf_counter()
         image_map = await self._prefetch_images(sections)
-        header_map = await self._prefetch_app_headers(sections)
+        t1 = time.perf_counter()
+        if self._enable_app_headers():
+            header_map = await self._prefetch_app_headers(sections)
+        else:
+            header_map = {}
+        t2 = time.perf_counter()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        rendered = await loop.run_in_executor(
             None,
             lambda: self._render_card_sync(
                 sections, publish_text, query_text, notice, image_map, header_map, card_kind
             ),
         )
+        t3 = time.perf_counter()
+        self._log_debug(
+            "render",
+            "card timing",
+            card_kind=card_kind,
+            sections=len(sections),
+            prefetch_images_ms=int((t1 - t0) * 1000),
+            prefetch_headers_ms=int((t2 - t1) * 1000),
+            render_ms=int((t3 - t2) * 1000),
+            total_ms=int((t3 - t0) * 1000),
+        )
+        return rendered
 
     def _draw_card_header(
         self,
@@ -1926,7 +2012,7 @@ class SteamUpdatePush(Star):
             image_urls: list[str] = []
             if is_workshop_sec:
                 u = str(getattr(item, "image_url", "") or "").strip()
-                if u:
+                if u and max_imgs > 0:
                     image_urls = [u]
             else:
                 image_urls = self._extract_image_urls(item.contents)[: max(0, max_imgs)]
@@ -2116,6 +2202,9 @@ class SteamUpdatePush(Star):
         if not self._is_allowed_image_url(url):
             self._debug(f"skip untrusted image url: {url}")
             return None
+        if self._is_in_fail_cooldown(self._image_fail_until, url):
+            self._debug(f"skip image by fail cooldown: {url}")
+            return None
         cache_path = self._news_image_cache_path(url)
         if cache_path.exists():
             try:
@@ -2126,38 +2215,48 @@ class SteamUpdatePush(Star):
                         cache_path.touch()
                     except Exception:
                         pass
+                    self._clear_fail_cooldown(self._image_fail_until, url)
                     return img
                 cache_path.unlink(missing_ok=True)
             except Exception as exc:
                 self._debug(f"read image cache failed: {url} {exc}")
         try:
-            resp = await self._client.get(url, timeout=10, follow_redirects=True)
+            resp = await self._client.get(
+                url,
+                timeout=self._news_image_timeout_sec(),
+                follow_redirects=True,
+            )
             resp.raise_for_status()
             content_type = (resp.headers.get("content-type") or "").lower()
             if content_type and not content_type.startswith("image/"):
                 self._debug(f"skip non-image content: {url} {content_type}")
+                self._mark_fail_cooldown(self._image_fail_until, url)
                 return None
             if resp.headers.get("Content-Length"):
                 try:
                     if int(resp.headers["Content-Length"]) > MAX_NEWS_IMAGE_BYTES:
                         self._debug(f"image too large by header: {url}")
+                        self._mark_fail_cooldown(self._image_fail_until, url)
                         return None
                 except Exception:
                     pass
             data = resp.content
             if not data:
+                self._mark_fail_cooldown(self._image_fail_until, url)
                 return None
             img = self._decode_image_bytes(data, url)
             if img is None:
+                self._mark_fail_cooldown(self._image_fail_until, url)
                 return None
             try:
                 cache_path.write_bytes(data)
-                self._trim_news_image_cache()
             except Exception as exc:
                 self._debug(f"write image cache failed: {url} {exc}")
+            self._clear_fail_cooldown(self._image_fail_until, url)
             return img
         except Exception as exc:
             self._debug(f"image download failed: {url} {exc}")
+            self._mark_fail_cooldown(self._image_fail_until, url)
             return None
 
     async def _prefetch_images(self, sections: list[AppSection]) -> dict[str, PilImage.Image]:
@@ -2171,7 +2270,7 @@ class SteamUpdatePush(Star):
                 candidates: list[str] = []
                 if is_workshop_sec:
                     u = str(getattr(item, "image_url", "") or "").strip()
-                    if u:
+                    if u and max_imgs > 0:
                         candidates.append(u)
                 else:
                     candidates.extend(self._extract_image_urls(item.contents)[: max(0, max_imgs)])
@@ -2182,7 +2281,7 @@ class SteamUpdatePush(Star):
         if not urls:
             return {}
 
-        semaphore = asyncio.Semaphore(3)
+        semaphore = asyncio.Semaphore(self._prefetch_image_concurrency())
         results: dict[str, PilImage.Image] = {}
 
         async def _fetch(url: str):
@@ -2192,6 +2291,8 @@ class SteamUpdatePush(Star):
                     results[url] = img
 
         await asyncio.gather(*[_fetch(u) for u in urls])
+        if results:
+            self._trim_news_image_cache()
         return results
 
     async def _prefetch_app_headers(self, sections: list[AppSection]) -> dict[str, PilImage.Image]:
@@ -2199,7 +2300,7 @@ class SteamUpdatePush(Star):
             return {}
         appids = {sec.appid for sec in sections if str(sec.appid).isdigit()}
         results: dict[str, PilImage.Image] = {}
-        semaphore = asyncio.Semaphore(2)
+        semaphore = asyncio.Semaphore(self._prefetch_header_concurrency())
 
         async def _load_one(appid: str):
             async with semaphore:
@@ -2217,6 +2318,7 @@ class SteamUpdatePush(Star):
                 img = PilImage.open(cache_path)
                 if img.mode not in ("RGB", "RGBA"):
                     img = img.convert("RGB")
+                self._clear_fail_cooldown(self._header_fail_until, appid)
                 return img
             except Exception:
                 try:
@@ -2225,6 +2327,9 @@ class SteamUpdatePush(Star):
                     pass
 
         if not self._client:
+            return None
+        if self._is_in_fail_cooldown(self._header_fail_until, appid):
+            self._debug(f"skip header by fail cooldown: appid={appid}")
             return None
 
         candidates = [
@@ -2235,7 +2340,7 @@ class SteamUpdatePush(Star):
         max_bytes = 6_000_000
         for url in candidates:
             try:
-                resp = await self._client.get(url, timeout=10)
+                resp = await self._client.get(url, timeout=self._header_download_timeout_sec())
                 resp.raise_for_status()
                 if resp.headers.get("Content-Length"):
                     if int(resp.headers["Content-Length"]) > max_bytes:
@@ -2250,10 +2355,12 @@ class SteamUpdatePush(Star):
                     img.save(cache_path, format="JPEG", quality=88)
                 except Exception:
                     pass
+                self._clear_fail_cooldown(self._header_fail_until, appid)
                 return img
             except Exception as exc:
                 self._debug(f"header download failed: {url} {exc}")
                 continue
+        self._mark_fail_cooldown(self._header_fail_until, appid)
         return None
 
     def _scale_image(self, img: PilImage.Image, max_w: int, max_h: int) -> PilImage.Image:

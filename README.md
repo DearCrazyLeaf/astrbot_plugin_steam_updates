@@ -85,6 +85,12 @@ AstrBot WebUI -> 插件 -> 插件配置
 | content_max_chars | 单游戏正文最大字符数 |
 | image_max_per_item | 每条更新最多渲染图片数 |
 | image_max_height | 图片最大高度 |
+| enable_app_headers | 是否启用游戏头图渲染 |
+| image_download_timeout_sec | 内容图片下载超时秒数 |
+| header_download_timeout_sec | 游戏头图下载超时秒数 |
+| prefetch_image_concurrency | 内容图片预取并发数 |
+| prefetch_header_concurrency | 头图预取并发数 |
+| failed_download_cooldown_sec | 下载失败冷却时间（秒） |
 | debug_log | 调试日志（仅控制台输出） |
 
 ### 🧪 调试日志 | Debug Logs
