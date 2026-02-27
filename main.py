@@ -661,13 +661,29 @@ class SteamUpdatePush(Star):
         return self._normalize_manual_commands(raw, ["\u521b\u610f\u5de5\u574a\u66f4\u65b0"])
 
     @staticmethod
-    def _match_command(text: str, commands: list[str]) -> bool:
-        if not text or not commands:
+    def _normalize_manual_command_text(text: str) -> str:
+        clean = str(text or "").strip()
+        if clean.startswith(("/", "\uFF0F")):
+            clean = clean[1:].strip()
+        clean = re.sub(r"\s+", " ", clean)
+        return clean
+
+    def _match_command(self, text: str, commands: list[str]) -> bool:
+        if not commands:
             return False
-        if text in commands:
+        normalized_text = self._normalize_manual_command_text(text)
+        if not normalized_text:
+            return False
+        text_cf = normalized_text.casefold()
+        normalized_commands = [
+            self._normalize_manual_command_text(cmd) for cmd in commands if self._normalize_manual_command_text(cmd)
+        ]
+        if not normalized_commands:
+            return False
+        if text_cf in {cmd.casefold() for cmd in normalized_commands}:
             return True
-        text_cf = text.casefold()
-        return text_cf in {cmd.casefold() for cmd in commands}
+        # Allow suffix args, e.g. "创意工坊更新 3240880604"
+        return any(text_cf.startswith(cmd.casefold() + " ") for cmd in normalized_commands)
 
     # --- data fetch ---
     def _steam_lang(self) -> str:
@@ -2475,9 +2491,7 @@ class SteamUpdatePush(Star):
     async def steam_updates_on_group_message(self, event: AstrMessageEvent):
         game_commands = self._manual_game_query_commands()
         workshop_commands = self._manual_workshop_query_commands()
-        text = self._get_event_text(event)
-        if text.startswith(("/", "\uFF0F")):
-            text = text[1:].strip()
+        text = self._normalize_manual_command_text(self._get_event_text(event))
         if not text:
             return
         is_game_cmd = self._match_command(text, game_commands)
