@@ -13,7 +13,7 @@
 
 这是一个为 **AstrBot** 编写的插件：轮询游戏/创意工坊更新并推送（支持多 AppID、创意工坊ID、卡片或文本）
 
-当前版本：`v1.2.4`
+当前版本：`v1.2.5`
 
 > [!IMPORTANT]
 > 本插件优先使用 **Steam News API** 获取游戏更新日志；当 API 失败或返回为空时，可启用 Steam Feed 自动回退
@@ -101,9 +101,14 @@ AstrBot WebUI -> 插件 -> 插件配置
 
 ### 🌐 代理说明 | Proxy
 
-- `proxy_mode=system`：读取系统/容器环境变量（如 `HTTP_PROXY` / `HTTPS_PROXY`）
-- `proxy_mode=custom`：使用 `proxy_url` 指定代理
+- `proxy_mode=system`：读取 AstrBot 进程环境变量（如 `HTTP_PROXY` / `HTTPS_PROXY`）
+- `proxy_mode=custom`：使用 `proxy_url` 强制指定代理（推荐，最可控）
 - `proxy_mode=off`：不使用代理，直连请求
+
+建议：
+- 若创意工坊查询出现 `ConnectTimeout/ReadTimeout`，优先改为 `custom` 并设置 `proxy_url`（例如 `http://127.0.0.1:7890`）
+- 创意工坊不仅依赖 `api.steampowered.com`，还依赖 `steamcommunity.com`
+- 仅代理 API 而不代理社区域名时，常见现象是：游戏更新可用、创意工坊失败
 
 ---
 
@@ -130,29 +135,32 @@ AstrBot WebUI -> 插件 -> 插件配置
 
 ## 🧭 网络代理建议 | Network Proxy (Clash)
 
-部分地区访问 Steam API 可能不稳定，推荐使用 Clash **混合模式**并仅代理 Steam 相关域名：
+部分地区访问 Steam 相关服务可能不稳定，推荐使用 Clash **混合模式**并代理下列域名：
 
 ```yaml
 mixin:
   mode: rule
 
   proxy-groups:
-    - name: STEAM-API
+    - name: STEAM-UPDATES
       type: select
       proxies:
         - HK   # ← 改成你的节点
         - DIRECT
 
   rules:
-    # Steam API / News API
-    - DOMAIN,api.steampowered.com,STEAM-API
+    # Steam 更新插件核心域名（建议代理）
+    - DOMAIN,api.steampowered.com,STEAM-UPDATES
+    - DOMAIN,store.steampowered.com,STEAM-UPDATES
+    - DOMAIN-SUFFIX,steamcommunity.com,STEAM-UPDATES
+    - DOMAIN-SUFFIX,steampowered.com,STEAM-UPDATES
 
-    # 资源直连
-    - DOMAIN-SUFFIX,steamstatic.com,DIRECT
-    - DOMAIN-SUFFIX,akamaihd.net,DIRECT
-    - DOMAIN-SUFFIX,steampowered.com,DIRECT
+    # 资源域名（建议同样走代理，减少超时）
+    - DOMAIN-SUFFIX,steamstatic.com,STEAM-UPDATES
+    - DOMAIN-SUFFIX,steamusercontent.com,STEAM-UPDATES
+    - DOMAIN-SUFFIX,akamaihd.net,STEAM-UPDATES
 
-    # 其他全部直连
+    # 其余流量直连
     - MATCH,DIRECT
 ```
 

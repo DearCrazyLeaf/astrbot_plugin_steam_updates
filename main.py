@@ -714,7 +714,8 @@ class SteamUpdatePush(Star):
                         continue
                     updates_by_app[appid] = self._filter_recent_days(items, max_days)
             if workshop_all:
-                workshop_updates = self._filter_recent_days(workshop_all, max_days)
+                # Workshop fallback keeps latest item of each subscribed ID.
+                workshop_updates = workshop_all
             self._log_debug(
                 "manual",
                 "fallback path used",
@@ -1974,9 +1975,10 @@ class SteamUpdatePush(Star):
         section_title_font = self._load_font(section_title_size, bold=True)
         small_font = self._load_font(14, bold=False)
 
+        top_date_text = query_text or publish_text
         blocks = self._build_card_blocks(
             sections,
-            publish_text,
+            top_date_text,
             card_kind,
             max_text_width,
             title_font,
@@ -2232,6 +2234,12 @@ class SteamUpdatePush(Star):
             return ""
         if str(self._cfg("content_process_mode", "plugin")).lower().strip() == "llm":
             clean = text.strip()
+            # In llm mode, timeout/failure may fall back to raw upstream content.
+            # If markup remains, sanitize with plugin formatter to avoid unreadable card text.
+            if re.search(r"\[/?(?:p|list|h[1-6]|b|i|u|url|img|\*)\b[^\]]*\]", clean, flags=re.I) or re.search(
+                r"<[^>]+>", clean
+            ):
+                clean = self._format_news_text(clean)
             if len(clean) > max_chars:
                 clean = clean[: max_chars - 3].rstrip() + "..."
             return clean
