@@ -87,6 +87,7 @@ class SteamUpdatePush(Star):
         self._news_image_dir.mkdir(parents=True, exist_ok=True)
 
         self._client: httpx.AsyncClient | None = None
+        self._client_signature: str = ""
         self._poll_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._last_platform_name: str | None = None
@@ -100,7 +101,7 @@ class SteamUpdatePush(Star):
 
     # --- lifecycle ---
     async def initialize(self):
-        self._client = self._build_http_client()
+        await self._ensure_http_client()
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def terminate(self):
@@ -109,6 +110,8 @@ class SteamUpdatePush(Star):
             self._poll_task.cancel()
         if self._client:
             await self._client.aclose()
+        self._client = None
+        self._client_signature = ""
 
     # --- config helpers ---
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -170,6 +173,70 @@ class SteamUpdatePush(Star):
                 error=exc,
             )
             return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+    def _http_client_signature(self) -> str:
+        return f"{self._proxy_mode()}|{self._proxy_url()}"
+
+    async def _ensure_http_client(self) -> None:
+        signature = self._http_client_signature()
+        if self._client is not None and self._client_signature == signature:
+            return
+        old_client = self._client
+        self._client = self._build_http_client()
+        self._client_signature = signature
+        if old_client is not None:
+            try:
+                await old_client.aclose()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _exc_text(exc: Exception | None) -> str:
+        if exc is None:
+            return ""
+        return f"{type(exc).__name__}: {exc!r}"
+
+    @staticmethod
+    def _is_retryable_network_error(exc: Exception) -> bool:
+        return isinstance(exc, httpx.RequestError | httpx.TimeoutException)
+
+    async def _request_with_network_fallback(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        await self._ensure_http_client()
+        if self._client is None:
+            raise RuntimeError("http client not ready")
+
+        try:
+            return await self._client.request(method, url, **kwargs)
+        except Exception as exc:
+            if not isinstance(exc, Exception) or not self._is_retryable_network_error(exc):
+                raise
+
+            mode = self._proxy_mode()
+            fallback_kind = ""
+            fallback_kwargs: dict[str, Any] = {"trust_env": False}
+            if mode == "custom":
+                # Custom proxy may be unavailable; retry direct once.
+                fallback_kind = "direct"
+            else:
+                # If user filled proxy_url but mode is not custom, retry once with proxy URL.
+                proxy_url = self._proxy_url()
+                if proxy_url:
+                    fallback_kind = "custom_proxy"
+                    fallback_kwargs["proxy"] = proxy_url
+
+            if not fallback_kind:
+                raise
+
+            self._log_warn(
+                "network",
+                "primary request failed, retrying once",
+                method=method.upper(),
+                mode=mode,
+                fallback=fallback_kind,
+                error=self._exc_text(exc),
+            )
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), **fallback_kwargs) as client:
+                return await client.request(method, url, **kwargs)
 
     def _next_trace_id(self, prefix: str) -> str:
         self._trace_seq = (self._trace_seq + 1) % 1_000_000
@@ -415,6 +482,7 @@ class SteamUpdatePush(Star):
                 logger.exception("[steam_updates][poll] loop execution failed")
 
     async def _poll_once(self):
+        await self._ensure_http_client()
         trace = self._next_trace_id("poll")
         self._log_debug("poll", "start", trace=trace)
         if not bool(self._cfg("enable_push", True)):
@@ -558,6 +626,7 @@ class SteamUpdatePush(Star):
         self._log_debug("poll", "state updated", trace=trace, state_size=len(state))
 
     async def _manual_query(self, umo: str | None = None, query_kind: str = "all"):
+        await self._ensure_http_client()
         trace = self._next_trace_id("manual")
         kind = str(query_kind or "all").strip().lower()
         if kind not in {"all", "game", "workshop"}:
@@ -807,7 +876,12 @@ class SteamUpdatePush(Star):
             last_exc: Exception | None = None
             for attempt in range(1, 4):
                 try:
-                    resp = await self._client.post(url, data=data, timeout=self._workshop_timeout_sec())
+                    resp = await self._request_with_network_fallback(
+                        "POST",
+                        url,
+                        data=data,
+                        timeout=self._workshop_timeout_sec(),
+                    )
                     resp.raise_for_status()
                     payload = resp.json()
                     details = payload.get("response", {}).get("publishedfiledetails", []) or []
@@ -820,7 +894,7 @@ class SteamUpdatePush(Star):
             self._log_warn(
                 "workshop",
                 "details request failed",
-                error=last_exc,
+                error=self._exc_text(last_exc),
                 count=len(ids),
                 attempts=3,
             )
@@ -1029,7 +1103,8 @@ class SteamUpdatePush(Star):
         last_exc: Exception | None = None
         for attempt in range(1, 4):
             try:
-                resp = await self._client.get(
+                resp = await self._request_with_network_fallback(
+                    "GET",
                     item_url,
                     headers=headers,
                     timeout=self._workshop_timeout_sec(),
@@ -1047,7 +1122,7 @@ class SteamUpdatePush(Star):
                 if attempt < 3:
                     await asyncio.sleep(0.6 * attempt)
                 continue
-        self._log_warn("workshop_url", "url fallback failed", workshop_id=workshop_id, error=last_exc)
+        self._log_warn("workshop_url", "url fallback failed", workshop_id=workshop_id, error=self._exc_text(last_exc))
         return None
 
     def _workshop_item_to_news(self, item: dict[str, Any]) -> NewsItem | None:
@@ -1205,11 +1280,11 @@ class SteamUpdatePush(Star):
         if api_key:
             params["key"] = api_key
         try:
-            resp = await self._client.get(STEAM_NEWS_API, params=params, timeout=10)
+            resp = await self._request_with_network_fallback("GET", STEAM_NEWS_API, params=params, timeout=10)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
-            self._log_warn("fetch_api", "request failed", appid=appid, error=exc, has_key=has_key)
+            self._log_warn("fetch_api", "request failed", appid=appid, error=self._exc_text(exc), has_key=has_key)
             return []
 
         items = data.get("appnews", {}).get("newsitems", []) or []
@@ -1272,11 +1347,11 @@ class SteamUpdatePush(Star):
         params = {"l": self._steam_lang()}
         timeout = self._get_feed_timeout_sec()
         try:
-            resp = await self._client.get(feed_url, params=params, timeout=timeout)
+            resp = await self._request_with_network_fallback("GET", feed_url, params=params, timeout=timeout)
             resp.raise_for_status()
             body = resp.text
         except Exception as exc:
-            self._log_warn("fetch_feed", "request failed", appid=appid, error=exc)
+            self._log_warn("fetch_feed", "request failed", appid=appid, error=self._exc_text(exc))
             return []
 
         try:
@@ -1439,7 +1514,8 @@ class SteamUpdatePush(Star):
             return f"AppID {appid}"
 
         try:
-            resp = await self._client.get(
+            resp = await self._request_with_network_fallback(
+                "GET",
                 "https://store.steampowered.com/api/appdetails",
                 params={"appids": appid, "l": lang},
                 timeout=10,
