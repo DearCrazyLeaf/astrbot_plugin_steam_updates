@@ -2,13 +2,18 @@
 
 本文档记录 `astrbot_plugin_steam_updates` 的版本变更。
 
+## v1.2.7
+
+### 修复
+- 添加去重机制，防止同一更新多次推送[issues#2](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/issues/2)
+
+<details>
+<summary>历史版本（点击展开）</summary>
+
 ## v1.2.6
 
 ### 变更
 - 配置重新优化分组
-
-<details>
-<summary>历史版本（点击展开）</summary>
 
 ## v1.2.5
 
