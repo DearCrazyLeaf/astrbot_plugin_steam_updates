@@ -561,13 +561,39 @@ class SteamUpdatePush(Star):
             fetch_count=fetch_count,
         )
         updates_by_app: dict[str, list[NewsItem]] = {}
+        app_state_updates: dict[str, str] = {}
         for appid in appids:
             items = await self._fetch_news(appid, fetch_count)
             if not items:
                 self._log_debug("poll", "appid has no updates", trace=trace, appid=appid)
                 continue
-            latest_gid = items[0].gid
-            if state.get(appid) == latest_gid:
+
+            filtered_items = self._filter_recent_days(items, max_days)
+            if not filtered_items:
+                self._log_debug("poll", "appid has no recent updates", trace=trace, appid=appid)
+                continue
+
+            latest_gid = filtered_items[0].gid
+            seen_key = self._news_seen_state_key(appid)
+            seen_gids = self._decode_news_seen_state(state.get(seen_key, ""))
+            legacy_gid = str(state.get(appid, "")).strip()
+
+            if seen_gids:
+                seen_set = set(seen_gids)
+                unseen_items = [item for item in filtered_items if item.gid not in seen_set]
+            elif legacy_gid:
+                boundary_idx = next((idx for idx, item in enumerate(filtered_items) if item.gid == legacy_gid), -1)
+                if boundary_idx >= 0:
+                    unseen_items = filtered_items[:boundary_idx]
+                else:
+                    unseen_items = [item for item in filtered_items if item.gid != legacy_gid]
+            else:
+                unseen_items = filtered_items
+
+            app_state_updates[appid] = latest_gid
+            app_state_updates[seen_key] = self._encode_news_seen_state(filtered_items)
+
+            if not unseen_items:
                 self._log_debug(
                     "poll",
                     "appid unchanged",
@@ -576,7 +602,8 @@ class SteamUpdatePush(Star):
                     gid=latest_gid,
                 )
                 continue
-            updates_by_app[appid] = self._filter_recent_days(items, max_days)
+
+            updates_by_app[appid] = unseen_items
 
         workshop_updates: list[NewsItem] = []
         workshop_state_updates: dict[str, str] = {}
@@ -663,8 +690,8 @@ class SteamUpdatePush(Star):
         )
 
         # update state only after push
-        for appid, items in updates_by_app.items():
-            state[appid] = items[0].gid
+        if app_state_updates:
+            state.update(app_state_updates)
         if workshop_state_updates:
             state.update(workshop_state_updates)
 
@@ -873,6 +900,91 @@ class SteamUpdatePush(Star):
     def _steam_lang(self) -> str:
         return str(self._cfg("steam_lang", "schinese")).strip() or "schinese"
 
+
+    @staticmethod
+    def _stable_news_gid(item: NewsItem) -> str:
+        gid = str(item.gid or "").strip()
+        if gid:
+            return gid
+        raw = f"{item.url}|{item.title}|{item.date}|{item.contents[:120]}"
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+
+    def _normalize_news_items(self, items: list[NewsItem]) -> list[NewsItem]:
+        merged: dict[str, NewsItem] = {}
+        for item in items or []:
+            gid = self._stable_news_gid(item)
+            if not gid:
+                continue
+            normalized = NewsItem(
+                gid=gid,
+                title=item.title,
+                url=item.url,
+                contents=item.contents,
+                date=int(item.date or 0),
+                appid=str(item.appid or ""),
+                image_url=str(item.image_url or ""),
+            )
+            old = merged.get(gid)
+            if old is None:
+                merged[gid] = normalized
+                continue
+
+            if normalized.date > old.date:
+                old.date = normalized.date
+            if len(normalized.contents or "") > len(old.contents or ""):
+                old.contents = normalized.contents
+            if normalized.title and not old.title:
+                old.title = normalized.title
+            if normalized.url and not old.url:
+                old.url = normalized.url
+            if normalized.appid and not old.appid:
+                old.appid = normalized.appid
+            if normalized.image_url and not old.image_url:
+                old.image_url = normalized.image_url
+
+        result = list(merged.values())
+        result.sort(key=lambda x: (int(x.date or 0), str(x.gid)), reverse=True)
+        return result
+
+    @staticmethod
+    def _news_seen_state_key(appid: str) -> str:
+        return f"news_seen:{appid}"
+
+    def _news_seen_state_limit(self) -> int:
+        try:
+            limit = int(self._cfg("news_seen_state_limit", 120))
+        except Exception:
+            limit = 120
+        return max(20, min(limit, 500))
+
+    def _encode_news_seen_state(self, items: list[NewsItem]) -> str:
+        gids: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            gid = str(item.gid or "").strip()
+            if not gid or gid in seen:
+                continue
+            seen.add(gid)
+            gids.append(gid)
+            if len(gids) >= self._news_seen_state_limit():
+                break
+        return json.dumps(gids, ensure_ascii=False)
+
+    @staticmethod
+    def _decode_news_seen_state(raw: Any) -> list[str]:
+        if raw is None:
+            return []
+        text = str(raw).strip()
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                return [str(x).strip() for x in data if str(x).strip()]
+        except Exception:
+            pass
+        return [x.strip() for x in text.split(",") if x.strip()]
+
     async def _fetch_news(self, appid: str, count: int, only_today: bool = True) -> list[NewsItem]:
         if not self._client:
             self._log_warn("fetch", "http client not ready", appid=appid)
@@ -890,8 +1002,10 @@ class SteamUpdatePush(Star):
             self._log_warn("fetch", "no news from api/feed", appid=appid, only_today=only_today)
             return []
 
+        items = self._normalize_news_items(items)
+
         if only_today:
-            filtered = self._filter_today_items(items)
+            filtered = self._normalize_news_items(self._filter_today_items(items))
             self._log_debug(
                 "fetch",
                 "news fetched and filtered",
