@@ -13,7 +13,11 @@
 
 这是一个为 **AstrBot** 编写的插件：轮询游戏/创意工坊更新并推送（支持多 AppID、创意工坊ID、卡片或文本）
 
-当前版本：`v1.2.5`
+[![Release](https://img.shields.io/github/v/release/DearCrazyLeaf/astrbot_plugin_steam_updates?include_prereleases&color=blueviolet&label=最新版本)](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/releases/latest)
+[![License](https://img.shields.io/badge/许可证-GPL%203.0-orange)](https://www.gnu.org/licenses/gpl-3.0.txt)
+[![Issues](https://img.shields.io/github/issues/DearCrazyLeaf/astrbot_plugin_steam_updates?color=darkgreen&label=反馈)](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/issues)
+[![Pull Requests](https://img.shields.io/github/issues-pr/DearCrazyLeaf/astrbot_plugin_steam_updates?color=blue&label=请求)](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pulls)
+[![GitHub Stars](https://img.shields.io/github/stars/DearCrazyLeaf/astrbot_plugin_steam_updates?color=yellow&label=标星)](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/stargazers)
 
 > [!IMPORTANT]
 > 本插件优先使用 **Steam News API** 获取游戏更新日志；当 API 失败或返回为空时，可启用 Steam Feed 自动回退
