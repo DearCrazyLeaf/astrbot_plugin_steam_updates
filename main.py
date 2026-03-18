@@ -634,7 +634,8 @@ class SteamUpdatePush(Star):
 
         payload_batches: list[tuple[str, list[AppSection]]] = []
         if updates_by_app:
-            game_sections = await self._build_sections(appids, updates_by_app)
+            updated_appids = [aid for aid in appids if aid in updates_by_app]
+            game_sections = await self._build_sections(updated_appids, updates_by_app)
             payload_batches.append(("game", game_sections))
         if workshop_updates:
             workshop_sections = await self._build_workshop_sections(workshop_updates)
