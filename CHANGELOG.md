@@ -2,13 +2,24 @@
 
 本文档记录 `astrbot_plugin_steam_updates` 的版本变更。
 
-## v1.2.7
+## v1.2.8
 
-### 修复
-- 添加去重机制，防止同一更新多次推送[issues#2](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/issues/2)
+### 优化
+- 优化游戏更新推送卡片的可读性与准确性
+[PR#4](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pull/4) by [Rhonin Wang](https://github.com/RhoninSeiei)
+
+### 变更
+- 轮询推送时仅包含本周期内有更新的 AppID
+- 游戏更新卡片补充“公告/新闻标题”
 
 <details>
 <summary>历史版本（点击展开）</summary>
+
+## v1.2.7
+
+### 修复
+- 添加去重机制，防止同一更新多次推送
+[issues#2](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/issues/2);[PR#3](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pull/3) by [Rhonin Wang](https://github.com/RhoninSeiei)
 
 ## v1.2.6
 
