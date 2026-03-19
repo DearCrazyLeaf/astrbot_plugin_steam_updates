@@ -634,7 +634,8 @@ class SteamUpdatePush(Star):
 
         payload_batches: list[tuple[str, list[AppSection]]] = []
         if updates_by_app:
-            game_sections = await self._build_sections(appids, updates_by_app)
+            updated_appids = [aid for aid in appids if aid in updates_by_app]
+            game_sections = await self._build_sections(updated_appids, updates_by_app)
             payload_batches.append(("game", game_sections))
         if workshop_updates:
             workshop_sections = await self._build_workshop_sections(workshop_updates)
@@ -2365,6 +2366,7 @@ class SteamUpdatePush(Star):
         header_map: dict[str, PilImage.Image],
     ) -> list[RenderBlock]:
         blocks: list[RenderBlock] = []
+        title_color = (199, 213, 224)
         is_workshop_sec = str(sec.appid).strip().lower().startswith("workshop")
         if not is_workshop_sec:
             game_name = str(sec.title or "").strip().strip("[]").strip("\u3010\u3011")
@@ -2387,6 +2389,17 @@ class SteamUpdatePush(Star):
                     title_blocks[-1].gap = 18
                     blocks.extend(title_blocks)
                 blocks.extend(self._wrap_blocks(f"\u6e38\u620f\uff1a{game_name}", body_font, body_color, max_text_width))
+            else:
+                section_size = int(getattr(section_title_font, "size", 26))
+                body_size = int(getattr(body_font, "size", 18))
+                news_title_size = max(body_size + 1, min(section_size - 2, body_size + 6))
+                news_title_font = self._load_font(news_title_size, bold=True)
+                news_title = str(item.title or "").strip().strip("[]").strip("\u3010\u3011")
+                if news_title:
+                    title_blocks = self._wrap_blocks(news_title, news_title_font, title_color, max_text_width)
+                    if title_blocks:
+                        title_blocks[-1].gap = 8
+                        blocks.extend(title_blocks)
             summary = self._summarize_text(item.contents, max_chars)
             if summary:
                 blocks.extend(self._wrap_blocks(summary, body_font, body_color, max_text_width))
