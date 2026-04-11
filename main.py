@@ -678,8 +678,10 @@ class SteamUpdatePush(Star):
         free_game_items = await self._fetch_free_game_items() if free_games_enabled else []
         free_game_state_updates: dict[str, str] = {}
         new_free_game_items: list[NewsItem] = []
-        attached_free_game_items: list[NewsItem] = []
-        standalone_free_game_items: list[NewsItem] = []
+        selected_free_game_items = self.PollFreeGameSelection(
+            attached_items=[],
+            standalone_items=[],
+        )
         if free_games_enabled:
             free_state_key = self._free_games_state_key()
             previous_free_gids = self._decode_news_seen_state(state.get(free_state_key, ""))
@@ -687,7 +689,7 @@ class SteamUpdatePush(Star):
                 free_game_items,
                 previous_free_gids,
             )
-            attached_free_game_items, standalone_free_game_items = self._select_poll_free_game_items(
+            selected_free_game_items = self._select_poll_free_game_items(
                 has_game_updates=bool(updates_by_app),
                 active_items=free_game_items,
                 new_items=new_free_game_items,
@@ -699,11 +701,11 @@ class SteamUpdatePush(Star):
                 trace=trace,
                 active_count=len(free_game_items),
                 new_count=len(new_free_game_items),
-                attached_count=len(attached_free_game_items),
-                standalone_count=len(standalone_free_game_items),
+                attached_count=len(selected_free_game_items.attached_items),
+                standalone_count=len(selected_free_game_items.standalone_items),
             )
 
-        if not updates_by_app and not workshop_updates and not standalone_free_game_items:
+        if not updates_by_app and not workshop_updates and not selected_free_game_items.standalone_items:
             self._log_debug("poll", "no app/workshop/standalone_free_game has updates", trace=trace)
             if workshop_state_updates:
                 state.update(workshop_state_updates)
@@ -718,8 +720,8 @@ class SteamUpdatePush(Star):
             app_count=len(updates_by_app),
             workshop_update_count=len(workshop_updates),
             free_game_new_count=len(new_free_game_items),
-            free_game_attached_count=len(attached_free_game_items),
-            free_game_standalone_count=len(standalone_free_game_items),
+            free_game_attached_count=len(selected_free_game_items.attached_items),
+            free_game_standalone_count=len(selected_free_game_items.standalone_items),
             groups=len(group_ids),
         )
 
@@ -729,15 +731,15 @@ class SteamUpdatePush(Star):
             game_sections = await self._build_sections(updated_appids, updates_by_app) if updated_appids else []
             merged_game_sections = self._merge_game_sections_with_free_games(
                 game_sections,
-                attached_free_game_items,
+                selected_free_game_items.attached_items,
                 free_only_when_no_news=True,
             )
             if merged_game_sections:
                 payload_batches.append(("game", merged_game_sections))
-        elif standalone_free_game_items:
+        elif selected_free_game_items.standalone_items:
             free_only_sections = self._merge_game_sections_with_free_games(
                 [],
-                standalone_free_game_items,
+                selected_free_game_items.standalone_items,
                 free_only_when_no_news=True,
             )
             if free_only_sections:
@@ -791,8 +793,8 @@ class SteamUpdatePush(Star):
             trace=trace,
             app_count=len(updates_by_app),
             workshop_update_count=len(workshop_updates),
-            free_game_attached_count=len(attached_free_game_items),
-            free_game_standalone_count=len(standalone_free_game_items),
+            free_game_attached_count=len(selected_free_game_items.attached_items),
+            free_game_standalone_count=len(selected_free_game_items.standalone_items),
             payload_count=len(payload_batches),
             groups=len(group_ids),
         )
@@ -1276,15 +1278,26 @@ class SteamUpdatePush(Star):
                 new_items.append(item)
         return new_items, snapshot
 
+    @dataclass(frozen=True)
+    class PollFreeGameSelection:
+        attached_items: list[NewsItem]
+        standalone_items: list[NewsItem]
+
     def _select_poll_free_game_items(
         self,
         has_game_updates: bool,
         active_items: list[NewsItem],
         new_items: list[NewsItem],
-    ) -> tuple[list[NewsItem], list[NewsItem]]:
+    ) -> "SteamUpdatePush.PollFreeGameSelection":
         if has_game_updates:
-            return list(active_items or []), []
-        return [], list(new_items or [])
+            return self.PollFreeGameSelection(
+                attached_items=list(active_items or []),
+                standalone_items=[],
+            )
+        return self.PollFreeGameSelection(
+            attached_items=[],
+            standalone_items=list(new_items or []),
+        )
 
     def _merge_game_sections_with_free_games(
         self,
