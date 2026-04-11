@@ -162,6 +162,7 @@ class FreeGamesLogicTest(unittest.TestCase):
 
     def _make_plugin(self):
         plugin = object.__new__(self.mod.SteamUpdatePush)
+        plugin._trace_seq = 0
         plugin._log_warn = lambda *args, **kwargs: None
         plugin._log_debug = lambda *args, **kwargs: None
         plugin._debug = lambda *args, **kwargs: None
@@ -344,28 +345,87 @@ class FreeGamesLogicTest(unittest.TestCase):
         active = [self.mod.NewsItem("free-old", "Portal", "u1", "c1", 100)]
         new = [self.mod.NewsItem("free-new", "Portal", "u2", "c2", 200)]
 
-        attached, standalone = plugin._select_poll_free_game_items(
+        selection = plugin._select_poll_free_game_items(
             has_game_updates=True,
             active_items=active,
             new_items=new,
         )
 
-        self.assertEqual([item.gid for item in attached], ["free-old"])
-        self.assertEqual(standalone, [])
+        self.assertEqual(
+            [item.gid for item in selection.attached_items],
+            ["free-old"],
+        )
+        self.assertEqual(selection.standalone_items, [])
 
     def test_select_poll_free_game_items_uses_new_items_for_standalone_push(self):
         plugin = self._make_plugin()
         active = [self.mod.NewsItem("free-old", "Portal", "u1", "c1", 100)]
         new = [self.mod.NewsItem("free-new", "Portal", "u2", "c2", 200)]
 
-        attached, standalone = plugin._select_poll_free_game_items(
+        selection = plugin._select_poll_free_game_items(
             has_game_updates=False,
             active_items=active,
             new_items=new,
         )
 
-        self.assertEqual(attached, [])
-        self.assertEqual([item.gid for item in standalone], ["free-new"])
+        self.assertEqual(selection.attached_items, [])
+        self.assertEqual(
+            [item.gid for item in selection.standalone_items],
+            ["free-new"],
+        )
+
+    def test_manual_query_appends_free_games_after_game_fallback(self):
+        plugin = self._make_plugin()
+        config = {
+            "steam_appids": ["730"],
+            "message_mode": "card",
+            "free_games_enable": True,
+            "free_games_manual_only_when_no_news": False,
+            "workshop_enable": False,
+            "workshop_item_ids": [],
+        }
+        plugin._cfg = lambda key, default=None: config.get(key, default)
+        plugin._ensure_http_client = self._async_noop
+        plugin._normalize_appids = lambda values: ["730"]
+        plugin._normalize_workshop_item_ids = lambda values: []
+        plugin._workshop_enabled = lambda: False
+        plugin._get_max_days = lambda: 1
+        fallback_item = self.mod.NewsItem("fallback", "Older Patch", "u1", "body", 100)
+
+        async def _fetch_news(appid, count, only_today=True):
+            return [] if only_today else [fallback_item]
+
+        plugin._fetch_news = _fetch_news
+        plugin._fetch_workshop_news_items = self._async_return([])
+        plugin._fetch_free_game_items = self._async_return(
+            [self.mod.NewsItem("free-new", "Portal", "u2", "c2", 200)]
+        )
+        plugin._build_sections = self._async_return(
+            [self.mod.AppSection("730", "Counter-Strike 2", [fallback_item])]
+        )
+        plugin._build_workshop_sections = self._async_return([])
+        plugin._render_payloads = []
+
+        async def _render_card(
+            sections,
+            publish_text,
+            query_text,
+            notice="",
+            card_kind="game",
+        ):
+            plugin._render_payloads.append((card_kind, sections))
+            return b"img"
+
+        plugin._render_card = _render_card
+
+        results, err = asyncio.run(plugin._manual_query(query_kind="game"))
+
+        self.assertIsNone(err)
+        self.assertEqual(results, [b"img"])
+        self.assertEqual(
+            [section.appid for section in plugin._render_payloads[0][1]],
+            ["730", "free_games"],
+        )
 
     def test_merge_sections_returns_free_only_when_enabled(self):
         plugin = self._make_plugin()
