@@ -1,0 +1,319 @@
+import importlib.util
+import sys
+import types
+import unittest
+from pathlib import Path
+
+
+PLUGIN_PATH = Path("/mnt/s/Projects/astrbot_plugin_steam_updates/main.py")
+MODULE_NAME = "steam_updates_main_under_test"
+
+
+def _install_stub_modules() -> None:
+    if "astrbot" in sys.modules:
+        return
+
+    class _Logger:
+        def info(self, *args, **kwargs):
+            return None
+
+        def warning(self, *args, **kwargs):
+            return None
+
+        def error(self, *args, **kwargs):
+            return None
+
+        def debug(self, *args, **kwargs):
+            return None
+
+        def exception(self, *args, **kwargs):
+            return None
+
+    def _identity_decorator(*args, **kwargs):
+        def _wrap(func):
+            return func
+
+        return _wrap
+
+    class _EventMessageType:
+        GROUP_MESSAGE = "group"
+
+    filter_obj = types.SimpleNamespace(
+        EventMessageType=_EventMessageType,
+        command=_identity_decorator,
+        event_message_type=_identity_decorator,
+    )
+
+    class _Star:
+        def __init__(self, context=None):
+            self.context = context
+
+    class _StarTools:
+        @staticmethod
+        def get_data_dir(plugin_name=None):
+            return Path("/tmp/astrbot_plugin_steam_updates_tests")
+
+    class _AstrBotConfig(dict):
+        pass
+
+    class _Plain:
+        def __init__(self, text=""):
+            self.text = text
+
+    class _Image:
+        def __init__(self, file=""):
+            self.file = file
+
+    class _MessageChain:
+        def __init__(self, chain=None):
+            self.chain = chain or []
+
+    class _AstrMessageEvent:
+        pass
+
+    class _AiocqhttpMessageEvent:
+        pass
+
+    astrbot_mod = types.ModuleType("astrbot")
+    astrbot_api_mod = types.ModuleType("astrbot.api")
+    astrbot_api_mod.logger = _Logger()
+
+    astrbot_api_event_mod = types.ModuleType("astrbot.api.event")
+    astrbot_api_event_mod.filter = filter_obj
+
+    astrbot_api_star_mod = types.ModuleType("astrbot.api.star")
+    astrbot_api_star_mod.Context = object
+    astrbot_api_star_mod.Star = _Star
+    astrbot_api_star_mod.StarTools = _StarTools
+
+    astrbot_core_config_mod = types.ModuleType("astrbot.core.config.astrbot_config")
+    astrbot_core_config_mod.AstrBotConfig = _AstrBotConfig
+
+    astrbot_message_components_mod = types.ModuleType("astrbot.core.message.components")
+    astrbot_message_components_mod.Image = _Image
+    astrbot_message_components_mod.Plain = _Plain
+
+    astrbot_message_result_mod = types.ModuleType(
+        "astrbot.core.message.message_event_result"
+    )
+    astrbot_message_result_mod.MessageChain = _MessageChain
+
+    astrbot_event_mod = types.ModuleType("astrbot.core.platform.astr_message_event")
+    astrbot_event_mod.AstrMessageEvent = _AstrMessageEvent
+
+    astrbot_aiocq_mod = types.ModuleType(
+        "astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event"
+    )
+    astrbot_aiocq_mod.AiocqhttpMessageEvent = _AiocqhttpMessageEvent
+
+    pil_mod = types.ModuleType("PIL")
+    pil_image_mod = types.ModuleType("PIL.Image")
+    pil_draw_mod = types.ModuleType("PIL.ImageDraw")
+    pil_font_mod = types.ModuleType("PIL.ImageFont")
+
+    class _PilImage:
+        pass
+
+    class _Draw:
+        pass
+
+    class _Font:
+        pass
+
+    pil_image_mod.Image = _PilImage
+    pil_draw_mod.ImageDraw = _Draw
+    pil_font_mod.FreeTypeFont = _Font
+
+    sys.modules["astrbot"] = astrbot_mod
+    sys.modules["astrbot.api"] = astrbot_api_mod
+    sys.modules["astrbot.api.event"] = astrbot_api_event_mod
+    sys.modules["astrbot.api.star"] = astrbot_api_star_mod
+    sys.modules["astrbot.core.config.astrbot_config"] = astrbot_core_config_mod
+    sys.modules["astrbot.core.message.components"] = astrbot_message_components_mod
+    sys.modules["astrbot.core.message.message_event_result"] = astrbot_message_result_mod
+    sys.modules["astrbot.core.platform.astr_message_event"] = astrbot_event_mod
+    sys.modules[
+        "astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event"
+    ] = astrbot_aiocq_mod
+    sys.modules["PIL"] = pil_mod
+    sys.modules["PIL.Image"] = pil_image_mod
+    sys.modules["PIL.ImageDraw"] = pil_draw_mod
+    sys.modules["PIL.ImageFont"] = pil_font_mod
+
+
+def _load_module():
+    _install_stub_modules()
+    if MODULE_NAME in sys.modules:
+        return sys.modules[MODULE_NAME]
+    spec = importlib.util.spec_from_file_location(MODULE_NAME, PLUGIN_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[MODULE_NAME] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class FreeGamesLogicTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_module()
+
+    def _make_plugin(self):
+        plugin = object.__new__(self.mod.SteamUpdatePush)
+        plugin._log_warn = lambda *args, **kwargs: None
+        plugin._log_debug = lambda *args, **kwargs: None
+        plugin._debug = lambda *args, **kwargs: None
+        plugin._cfg = lambda key, default=None: default
+        plugin._format_time = lambda ts: "2026/04/07 12:00" if ts else ""
+        return plugin
+
+    def test_format_free_game_title_appends_official_name(self):
+        plugin = self._make_plugin()
+        title = plugin._format_free_game_title("Portal", "传送门")
+        self.assertEqual(title, "Portal（传送门）")
+
+    def test_format_free_game_title_skips_duplicate_name(self):
+        plugin = self._make_plugin()
+        title = plugin._format_free_game_title("传送门", "传送门")
+        self.assertEqual(title, "传送门")
+
+    def test_is_free_game_active_requires_future_end_time(self):
+        plugin = self._make_plugin()
+        active = plugin._is_free_game_active(
+            {
+                "status": "Active",
+                "end_date": "2099-12-31 23:59:59",
+            },
+            now_ts=1_775_536_800,
+        )
+        expired = plugin._is_free_game_active(
+            {
+                "status": "Active",
+                "end_date": "2020-01-01 00:00:00",
+            },
+            now_ts=1_775_536_800,
+        )
+        self.assertTrue(active)
+        self.assertFalse(expired)
+
+    def test_free_game_entry_to_news_maps_required_fields(self):
+        plugin = self._make_plugin()
+        item = plugin._free_game_entry_to_news(
+            {
+                "id": 9001,
+                "title": "Portal",
+                "worth": "$19.99",
+                "thumbnail": "https://example.com/portal.jpg",
+                "open_giveaway_url": "https://example.com/giveaway/portal",
+                "published_date": "2026-04-07 08:00:00",
+                "end_date": "2026-04-10 08:00:00",
+                "instructions": "Install and claim",
+                "status": "Active",
+            },
+            official_name="传送门",
+        )
+        self.assertEqual(item.gid, "9001")
+        self.assertEqual(item.title, "Portal（传送门）")
+        self.assertEqual(item.url, "https://example.com/giveaway/portal")
+        self.assertEqual(item.image_url, "https://example.com/portal.jpg")
+        self.assertIn("截止时间:", item.contents)
+        self.assertIn("原价:", item.contents)
+        self.assertIn("领取方式:", item.contents)
+        self.assertIn("活动链接:", item.contents)
+
+    def test_free_game_entry_prefers_resolved_store_url_and_appid(self):
+        plugin = self._make_plugin()
+        item = plugin._free_game_entry_to_news(
+            {
+                "id": 9002,
+                "title": "Chamber Survival",
+                "_store_url": "https://store.steampowered.com/app/2943780/Chamber_Survival/",
+                "open_giveaway_url": "https://www.gamerpower.com/open/chamber-survival-steam-giveaway",
+                "published_date": "2026-04-07 08:00:00",
+                "end_date": "2026-04-10 08:00:00",
+                "status": "Active",
+            }
+        )
+        self.assertEqual(item.url, "https://store.steampowered.com/app/2943780/Chamber_Survival/")
+        self.assertEqual(item.appid, "2943780")
+
+    def test_split_new_free_game_items_detects_unseen_entries(self):
+        plugin = self._make_plugin()
+        items = [
+            self.mod.NewsItem("old", "Old", "u1", "c1", 100),
+            self.mod.NewsItem("new", "New", "u2", "c2", 200),
+        ]
+        new_items, snapshot = plugin._split_new_free_game_items(items, ["old"])
+        self.assertEqual([item.gid for item in new_items], ["new"])
+        self.assertEqual(snapshot, ["old", "new"])
+
+    def test_select_poll_free_game_items_appends_active_items_when_game_updates_exist(self):
+        plugin = self._make_plugin()
+        active = [self.mod.NewsItem("free-old", "Portal", "u1", "c1", 100)]
+        new = [self.mod.NewsItem("free-new", "Portal", "u2", "c2", 200)]
+
+        attached, standalone = plugin._select_poll_free_game_items(
+            has_game_updates=True,
+            active_items=active,
+            new_items=new,
+        )
+
+        self.assertEqual([item.gid for item in attached], ["free-old"])
+        self.assertEqual(standalone, [])
+
+    def test_select_poll_free_game_items_uses_new_items_for_standalone_push(self):
+        plugin = self._make_plugin()
+        active = [self.mod.NewsItem("free-old", "Portal", "u1", "c1", 100)]
+        new = [self.mod.NewsItem("free-new", "Portal", "u2", "c2", 200)]
+
+        attached, standalone = plugin._select_poll_free_game_items(
+            has_game_updates=False,
+            active_items=active,
+            new_items=new,
+        )
+
+        self.assertEqual(attached, [])
+        self.assertEqual([item.gid for item in standalone], ["free-new"])
+
+    def test_merge_sections_returns_free_only_when_enabled(self):
+        plugin = self._make_plugin()
+        free_items = [self.mod.NewsItem("new", "Portal", "u", "c", 200)]
+        merged = plugin._merge_game_sections_with_free_games(
+            game_sections=[],
+            free_game_items=free_items,
+            free_only_when_no_news=True,
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].appid, "free_games")
+        self.assertEqual(merged[0].title, "限时免费领取")
+
+    def test_merge_sections_appends_free_section_after_game_updates(self):
+        plugin = self._make_plugin()
+        game_sections = [
+            self.mod.AppSection(
+                appid="730",
+                title="Counter-Strike 2",
+                updates=[self.mod.NewsItem("g1", "Patch Notes", "u1", "c1", 100)],
+            )
+        ]
+        free_items = [self.mod.NewsItem("new", "Portal", "u", "c", 200)]
+        merged = plugin._merge_game_sections_with_free_games(
+            game_sections=game_sections,
+            free_game_items=free_items,
+            free_only_when_no_news=True,
+        )
+        self.assertEqual([section.appid for section in merged], ["730", "free_games"])
+
+    def test_merge_sections_skips_free_only_when_disabled_and_no_news(self):
+        plugin = self._make_plugin()
+        free_items = [self.mod.NewsItem("new", "Portal", "u", "c", 200)]
+        merged = plugin._merge_game_sections_with_free_games(
+            game_sections=[],
+            free_game_items=free_items,
+            free_only_when_no_news=False,
+        )
+        self.assertEqual(merged, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

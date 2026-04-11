@@ -986,6 +986,171 @@ class SteamUpdatePush(Star):
             pass
         return [x.strip() for x in text.split(",") if x.strip()]
 
+    @staticmethod
+    def _free_games_state_key() -> str:
+        return "free_games_active_gids"
+
+    @staticmethod
+    def _parse_free_game_datetime(raw: Any) -> int:
+        text = str(raw or "").strip()
+        if not text or text.lower() in {"n/a", "null", "none"}:
+            return 0
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return int(datetime.strptime(text, fmt).timestamp())
+            except Exception:
+                continue
+        try:
+            iso_text = text.replace("Z", "+00:00")
+            if "T" not in iso_text and " " in iso_text:
+                iso_text = iso_text.replace(" ", "T", 1)
+            return int(datetime.fromisoformat(iso_text).timestamp())
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _format_free_game_title(title: str, official_name: str = "") -> str:
+        base = str(title or "").strip() or "未知游戏"
+        official = str(official_name or "").strip()
+        if not official or official.casefold() == base.casefold():
+            return base
+        return f"{base}（{official}）"
+
+    @staticmethod
+    def _extract_free_game_appid(entry: dict[str, Any]) -> str:
+        if not isinstance(entry, dict):
+            return ""
+        for key in ("_store_url", "store_url", "open_giveaway_url", "gamerpower_url", "description", "instructions"):
+            text = str(entry.get(key) or "").strip()
+            if not text:
+                continue
+            match = re.search(r"/app/(\d+)", text)
+            if match:
+                return match.group(1)
+        return ""
+
+    def _is_free_game_active(self, entry: dict[str, Any], now_ts: int | None = None) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        status = str(entry.get("status") or "").strip().lower()
+        if status and status != "active":
+            return False
+        end_ts = self._parse_free_game_datetime(entry.get("end_date"))
+        if end_ts <= 0:
+            return False
+        current_ts = int(now_ts if now_ts is not None else time.time())
+        return end_ts > current_ts
+
+    def _free_game_entry_to_news(
+        self,
+        entry: dict[str, Any],
+        official_name: str = "",
+        appid: str = "",
+    ) -> NewsItem:
+        title = self._format_free_game_title(entry.get("title", ""), official_name)
+        url = str(
+            entry.get("_store_url")
+            or entry.get("store_url")
+            or entry.get("open_giveaway_url")
+            or entry.get("gamerpower_url")
+            or ""
+        ).strip()
+        gid = str(entry.get("id") or "").strip() or url
+        if not gid:
+            raw = f"{title}|{url}|{entry.get('published_date') or ''}"
+            gid = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+        published_ts = self._parse_free_game_datetime(entry.get("published_date"))
+        end_ts = self._parse_free_game_datetime(entry.get("end_date"))
+        appid = str(appid or self._extract_free_game_appid(entry)).strip()
+        end_text = self._format_time(end_ts) if end_ts else (str(entry.get("end_date") or "").strip() or "未知")
+        worth = str(entry.get("worth") or "").strip() or "未知"
+        instructions = str(entry.get("instructions") or "").strip() or "见活动页面"
+        lines = [
+            f"截止时间: {end_text}",
+            f"原价: {worth}",
+            f"领取方式: {instructions}",
+            f"活动链接: {url or '-'}",
+        ]
+        return NewsItem(
+            gid=gid,
+            title=title,
+            url=url,
+            contents="\n".join(lines),
+            date=published_ts or end_ts,
+            appid=appid,
+            image_url=str(entry.get("thumbnail") or "").strip(),
+        )
+
+    async def _resolve_free_game_store_url(self, url: str) -> str:
+        target = str(url or "").strip()
+        if not target or not self._client:
+            return ""
+        if "/app/" in target:
+            return target
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            resp = await self._request_with_network_fallback(
+                "GET",
+                target,
+                headers=headers,
+                timeout=10,
+                follow_redirects=False,
+            )
+            location = str(resp.headers.get("location") or "").strip()
+            if location and "/app/" in location:
+                return location
+        except Exception as exc:
+            self._log_debug("free_games", "store url resolve failed", url=target, error=self._exc_text(exc))
+        return ""
+
+    def _split_new_free_game_items(
+        self,
+        items: list[NewsItem],
+        previous_gids: list[str],
+    ) -> tuple[list[NewsItem], list[str]]:
+        previous = {str(gid).strip() for gid in previous_gids if str(gid).strip()}
+        snapshot: list[str] = []
+        snapshot_seen: set[str] = set()
+        new_items: list[NewsItem] = []
+        for item in items or []:
+            gid = str(item.gid or "").strip()
+            if not gid or gid in snapshot_seen:
+                continue
+            snapshot_seen.add(gid)
+            snapshot.append(gid)
+            if gid not in previous:
+                new_items.append(item)
+        return new_items, snapshot
+
+    def _select_poll_free_game_items(
+        self,
+        has_game_updates: bool,
+        active_items: list[NewsItem],
+        new_items: list[NewsItem],
+    ) -> tuple[list[NewsItem], list[NewsItem]]:
+        if has_game_updates:
+            return list(active_items or []), []
+        return [], list(new_items or [])
+
+    def _merge_game_sections_with_free_games(
+        self,
+        game_sections: list[AppSection],
+        free_game_items: list[NewsItem],
+        free_only_when_no_news: bool,
+    ) -> list[AppSection]:
+        merged = list(game_sections or [])
+        if not free_game_items:
+            return merged
+        free_section = AppSection(
+            appid="free_games",
+            title="限时免费领取",
+            updates=list(free_game_items),
+        )
+        if merged:
+            merged.append(free_section)
+            return merged
+        return [free_section] if free_only_when_no_news else []
+
     async def _fetch_news(self, appid: str, count: int, only_today: bool = True) -> list[NewsItem]:
         if not self._client:
             self._log_warn("fetch", "http client not ready", appid=appid)
