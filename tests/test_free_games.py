@@ -1,4 +1,6 @@
+import asyncio
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -167,6 +169,75 @@ class FreeGamesLogicTest(unittest.TestCase):
         plugin._format_time = lambda ts: "2026/04/07 12:00" if ts else ""
         return plugin
 
+    async def _async_noop(self):
+        return None
+
+    def _async_return(self, value):
+        async def _inner(*args, **kwargs):
+            return value
+
+        return _inner
+
+    def _make_poll_plugin(
+        self,
+        *,
+        updates_by_app,
+        free_items,
+        previous_free_gids,
+        workshop_updates=None,
+    ):
+        plugin = self._make_plugin()
+        config = {
+            "enable_push": True,
+            "notify_group_ids": ["10001"],
+            "steam_appids": ["730"],
+            "message_mode": "card",
+            "free_games_enable": True,
+            "workshop_enable": bool(workshop_updates),
+            "workshop_item_ids": ["ws1"] if workshop_updates else [],
+        }
+        plugin._cfg = lambda key, default=None: config.get(key, default)
+        plugin._ensure_http_client = self._async_noop
+        plugin._normalize_appids = lambda values: ["730"]
+        plugin._normalize_workshop_item_ids = lambda values: ["ws1"] if workshop_updates else []
+        plugin._workshop_enabled = lambda: bool(workshop_updates)
+        plugin._get_max_days = lambda: 1
+        plugin._filter_recent_days = lambda items, max_days: list(items)
+        plugin._load_state = lambda: {
+            "free_games_active_gids": json.dumps(previous_free_gids, ensure_ascii=False),
+        }
+        plugin._save_state = lambda state: setattr(plugin, "_saved_state", state)
+        plugin._fetch_news = (
+            self._async_return([self.mod.NewsItem("n1", "Patch", "u1", "body", 100)])
+            if updates_by_app
+            else self._async_return([])
+        )
+        plugin._collect_workshop_updates_for_poll = self._async_return(
+            (workshop_updates or [], {})
+        )
+        plugin._fetch_free_game_items = self._async_return(free_items)
+        plugin._build_sections = (
+            self._async_return(
+                [self.mod.AppSection("730", "Counter-Strike 2", updates_by_app["730"])]
+            )
+            if updates_by_app
+            else self._async_return([])
+        )
+        plugin._build_workshop_sections = self._async_return(
+            [self.mod.AppSection("workshop:730", "创意工坊", workshop_updates or [])]
+        )
+        plugin._render_payloads = []
+
+        async def _render_card(sections, publish_text, query_text, card_kind="game"):
+            plugin._render_payloads.append((card_kind, sections))
+            return b"img"
+
+        plugin._render_card = _render_card
+        plugin._push_image = self._async_return(True)
+        plugin._push_text = self._async_return(True)
+        plugin._next_trace_id = lambda prefix: f"{prefix}-test"
+        return plugin
+
     def test_format_free_game_title_appends_official_name(self):
         plugin = self._make_plugin()
         title = plugin._format_free_game_title("Portal", "传送门")
@@ -247,6 +318,27 @@ class FreeGamesLogicTest(unittest.TestCase):
         self.assertEqual([item.gid for item in new_items], ["new"])
         self.assertEqual(snapshot, ["old", "new"])
 
+    def test_split_new_free_game_items_treats_reopened_activity_as_new_gid(self):
+        plugin = self._make_plugin()
+        current = [
+            self.mod.NewsItem(
+                "giveaway-2026-04-12",
+                "Portal",
+                "https://store.steampowered.com/app/400/",
+                "c1",
+                200,
+                appid="400",
+            )
+        ]
+
+        new_items, snapshot = plugin._split_new_free_game_items(
+            current,
+            ["giveaway-2026-04-01"],
+        )
+
+        self.assertEqual([item.gid for item in new_items], ["giveaway-2026-04-12"])
+        self.assertEqual(snapshot, ["giveaway-2026-04-12"])
+
     def test_select_poll_free_game_items_appends_active_items_when_game_updates_exist(self):
         plugin = self._make_plugin()
         active = [self.mod.NewsItem("free-old", "Portal", "u1", "c1", 100)]
@@ -313,6 +405,43 @@ class FreeGamesLogicTest(unittest.TestCase):
             free_only_when_no_news=False,
         )
         self.assertEqual(merged, [])
+
+    def test_poll_appends_active_free_games_to_game_push(self):
+        free_items = [
+            self.mod.NewsItem("free-old", "Portal", "u1", "c1", 200),
+            self.mod.NewsItem("free-new", "Half-Life", "u2", "c2", 300),
+        ]
+        plugin = self._make_poll_plugin(
+            updates_by_app={"730": [self.mod.NewsItem("n1", "Patch", "u1", "body", 100)]},
+            free_items=free_items,
+            previous_free_gids=["free-old"],
+            workshop_updates=[],
+        )
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertEqual(len(plugin._render_payloads), 1)
+        card_kind, sections = plugin._render_payloads[0]
+        self.assertEqual(card_kind, "game")
+        self.assertEqual([section.appid for section in sections], ["730", "free_games"])
+        self.assertEqual([item.gid for item in sections[-1].updates], ["free-old", "free-new"])
+
+    def test_poll_does_not_append_seen_free_games_to_workshop_push(self):
+        free_items = [self.mod.NewsItem("free-old", "Portal", "u1", "c1", 200)]
+        workshop_items = [self.mod.NewsItem("ws1", "Workshop Patch", "u2", "c2", 300)]
+        plugin = self._make_poll_plugin(
+            updates_by_app={},
+            free_items=free_items,
+            previous_free_gids=["free-old"],
+            workshop_updates=workshop_items,
+        )
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertEqual(len(plugin._render_payloads), 1)
+        card_kind, sections = plugin._render_payloads[0]
+        self.assertEqual(card_kind, "workshop")
+        self.assertEqual([section.appid for section in sections], ["workshop:730"])
 
 
 if __name__ == "__main__":
