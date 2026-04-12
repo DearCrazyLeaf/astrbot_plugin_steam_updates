@@ -83,6 +83,25 @@
       }
     }
   },
+  "free_games": {
+    "description": "免费领取活动",
+    "type": "object",
+    "hint": "Steam 限时免费领取活动推送与手动查询控制",
+    "items": {
+      "free_games_enable": {
+        "description": "启用限时免费领取活动",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后会查询当前仍可领取的 Steam 游戏，并作为独立分区附在游戏更新后面"
+      },
+      "free_games_manual_only_when_no_news": {
+        "description": "无普通更新时仅返回免费领取分区",
+        "type": "bool",
+        "default": true,
+        "hint": "手动查询在当天没有普通游戏更新时，仍可只返回“限时免费领取”分区"
+      }
+    }
+  },
   "workshop_updates": {
     "description": "创意工坊更新查询",
     "type": "object",
