@@ -309,6 +309,27 @@ class FreeGamesLogicTest(unittest.TestCase):
         self.assertEqual(item.url, "https://store.steampowered.com/app/2943780/Chamber_Survival/")
         self.assertEqual(item.appid, "2943780")
 
+    def test_free_game_entry_fallback_gid_uses_end_date(self):
+        plugin = self._make_plugin()
+        first = plugin._free_game_entry_to_news(
+            {
+                "title": "Portal",
+                "published_date": "2026-04-07 08:00:00",
+                "end_date": "2026-04-10 08:00:00",
+                "status": "Active",
+            }
+        )
+        second = plugin._free_game_entry_to_news(
+            {
+                "title": "Portal",
+                "published_date": "2026-04-07 08:00:00",
+                "end_date": "2026-04-11 08:00:00",
+                "status": "Active",
+            }
+        )
+
+        self.assertNotEqual(first.gid, second.gid)
+
     def test_split_new_free_game_items_detects_unseen_entries(self):
         plugin = self._make_plugin()
         items = [
@@ -502,6 +523,87 @@ class FreeGamesLogicTest(unittest.TestCase):
         card_kind, sections = plugin._render_payloads[0]
         self.assertEqual(card_kind, "workshop")
         self.assertEqual([section.appid for section in sections], ["workshop:730"])
+
+    def test_poll_keeps_standalone_free_games_separate_from_workshop_push(self):
+        free_items = [self.mod.NewsItem("free-new", "Portal", "u1", "c1", 200)]
+        workshop_items = [self.mod.NewsItem("ws1", "Workshop Patch", "u2", "c2", 300)]
+        plugin = self._make_poll_plugin(
+            updates_by_app={},
+            free_items=free_items,
+            previous_free_gids=[],
+            workshop_updates=workshop_items,
+        )
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertEqual(
+            [(card_kind, [section.appid for section in sections]) for card_kind, sections in plugin._render_payloads],
+            [("game", ["free_games"]), ("workshop", ["workshop:730"])],
+        )
+
+    def test_poll_preserves_free_game_snapshot_when_fetch_fails(self):
+        plugin = self._make_poll_plugin(
+            updates_by_app={},
+            free_items=[],
+            previous_free_gids=["free-old"],
+            workshop_updates=[],
+        )
+        plugin._fetch_free_game_items = self._async_return(None)
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertEqual(
+            plugin._saved_state["free_games_active_gids"],
+            json.dumps(["free-old"], ensure_ascii=False),
+        )
+
+    def test_manual_query_returns_free_games_when_no_appids(self):
+        plugin = self._make_plugin()
+        config = {
+            "steam_appids": [],
+            "message_mode": "card",
+            "free_games_enable": True,
+            "free_games_manual_only_when_no_news": False,
+            "workshop_enable": False,
+            "workshop_item_ids": [],
+        }
+        plugin._cfg = lambda key, default=None: config.get(key, default)
+        plugin._ensure_http_client = self._async_noop
+        plugin._normalize_appids = lambda values: []
+        plugin._normalize_workshop_item_ids = lambda values: []
+        plugin._workshop_enabled = lambda: False
+        plugin._get_max_days = lambda: 1
+        plugin._fetch_workshop_news_items = self._async_return([])
+        plugin._fetch_free_game_items = self._async_return(
+            [self.mod.NewsItem("free-new", "Portal", "u2", "c2", 200)]
+        )
+        plugin._build_sections = self._async_return([])
+        plugin._build_workshop_sections = self._async_return([])
+        plugin._render_payloads = []
+        notices = []
+
+        async def _render_card(
+            sections,
+            publish_text,
+            query_text,
+            notice="",
+            card_kind="game",
+        ):
+            plugin._render_payloads.append((card_kind, sections))
+            notices.append(notice)
+            return b"img"
+
+        plugin._render_card = _render_card
+
+        results, err = asyncio.run(plugin._manual_query(query_kind="game"))
+
+        self.assertIsNone(err)
+        self.assertEqual(results, [b"img"])
+        self.assertEqual(
+            [section.appid for section in plugin._render_payloads[0][1]],
+            ["free_games"],
+        )
+        self.assertEqual(notices, [""])
 
 
 if __name__ == "__main__":

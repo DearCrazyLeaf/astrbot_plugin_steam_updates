@@ -675,14 +675,15 @@ class SteamUpdatePush(Star):
                 state_update_count=len(workshop_state_updates),
             )
 
-        free_game_items = await self._fetch_free_game_items() if free_games_enabled else []
+        free_game_items_result = await self._fetch_free_game_items() if free_games_enabled else []
+        free_game_items = list(free_game_items_result or [])
         free_game_state_updates: dict[str, str] = {}
         new_free_game_items: list[NewsItem] = []
         selected_free_game_items = self.PollFreeGameSelection(
             attached_items=[],
             standalone_items=[],
         )
-        if free_games_enabled:
+        if free_games_enabled and free_game_items_result is not None:
             free_state_key = self._free_games_state_key()
             previous_free_gids = self._decode_news_seen_state(state.get(free_state_key, ""))
             new_free_game_items, free_snapshot = self._split_new_free_game_items(
@@ -703,6 +704,12 @@ class SteamUpdatePush(Star):
                 new_count=len(new_free_game_items),
                 attached_count=len(selected_free_game_items.attached_items),
                 standalone_count=len(selected_free_game_items.standalone_items),
+            )
+        elif free_games_enabled:
+            self._log_debug(
+                "free_games",
+                "poll skipped snapshot update due fetch failure",
+                trace=trace,
             )
 
         if not updates_by_app and not workshop_updates and not selected_free_game_items.standalone_items:
@@ -864,7 +871,8 @@ class SteamUpdatePush(Star):
 
         workshop_all = await self._fetch_workshop_news_items() if workshop_enabled else []
         workshop_updates = self._filter_today_items(workshop_all) if workshop_all else []
-        free_game_items = await self._fetch_free_game_items() if want_free_games else []
+        free_game_items_result = await self._fetch_free_game_items() if want_free_games else []
+        free_game_items = list(free_game_items_result or [])
 
         if want_game and free_game_items and not updates_by_app and not workshop_updates and self._free_games_manual_only_when_no_news():
             self._log_debug(
@@ -902,6 +910,7 @@ class SteamUpdatePush(Star):
             return results, None
 
         notice = ""
+        free_games_only_without_appids = bool(want_game and free_game_items and not appids)
         if not updates_by_app and not workshop_updates:
             if max_days > 1:
                 notice = f"\u6ca1\u6709\u627e\u5230\u5f53\u5929\u7684\u66f4\u65b0\u4fe1\u606f\uff0c\u4ee5\u4e0b\u662f\u6700\u8fd1 {max_days} \u5929\u7684\u66f4\u65b0\u5185\u5bb9"
@@ -935,7 +944,9 @@ class SteamUpdatePush(Star):
                 query_kind=kind,
                 appids=",".join(appids),
             )
-            return None, "\u672a\u83b7\u53d6\u5230\u66f4\u65b0\u6570\u636e"
+            if not free_games_only_without_appids:
+                return None, "\u672a\u83b7\u53d6\u5230\u66f4\u65b0\u6570\u636e"
+            notice = ""
 
         payload_batches: list[tuple[str, list[AppSection]]] = []
         if want_game and (updates_by_app or free_game_items):
@@ -944,7 +955,7 @@ class SteamUpdatePush(Star):
             merged_game_sections = self._merge_game_sections_with_free_games(
                 game_sections,
                 free_game_items,
-                free_only_when_no_news=self._free_games_manual_only_when_no_news(),
+                free_only_when_no_news=self._free_games_manual_only_when_no_news() or not appids,
             )
             if merged_game_sections:
                 payload_batches.append(("game", merged_game_sections))
@@ -1213,7 +1224,7 @@ class SteamUpdatePush(Star):
         ).strip()
         gid = str(entry.get("id") or "").strip() or url
         if not gid:
-            raw = f"{title}|{url}|{entry.get('published_date') or ''}"
+            raw = f"{title}|{entry.get('published_date') or ''}|{entry.get('end_date') or ''}"
             gid = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
         published_ts = self._parse_free_game_datetime(entry.get("published_date"))
         end_ts = self._parse_free_game_datetime(entry.get("end_date"))
@@ -1352,7 +1363,7 @@ class SteamUpdatePush(Star):
         self._log_debug("fetch", "news fetched", appid=appid, source=source, total=len(items))
         return items
 
-    async def _fetch_free_game_items(self) -> list[NewsItem]:
+    async def _fetch_free_game_items(self) -> list[NewsItem] | None:
         if not self._client or not self._free_games_enabled():
             return []
         try:
@@ -1365,10 +1376,10 @@ class SteamUpdatePush(Star):
             payload = resp.json()
         except Exception as exc:
             self._log_warn("free_games", "request failed", error=self._exc_text(exc))
-            return []
+            return None
         if not isinstance(payload, list):
             self._log_warn("free_games", "unexpected payload", payload_type=type(payload).__name__)
-            return []
+            return None
 
         active_entries = [
             entry for entry in payload
