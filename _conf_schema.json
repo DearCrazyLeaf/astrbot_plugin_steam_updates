@@ -99,6 +99,12 @@
         "type": "bool",
         "default": true,
         "hint": "手动查询在当天没有普通游戏更新时，仍可只返回“限时免费领取”分区"
+      },
+      "display_timezone": {
+        "description": "免费领取时间显示时区",
+        "type": "string",
+        "default": "",
+        "hint": "留空跟随容器系统时区；填写 IANA 时区名，例如 Asia/Shanghai"
       }
     }
   },

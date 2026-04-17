@@ -1330,12 +1330,9 @@ class SteamUpdatePush(Star):
         appid = str(appid or self._extract_free_game_appid(entry)).strip()
         end_text = self._format_free_game_time(end_ts) if end_ts else (str(entry.get("end_date") or "").strip() or "未知")
         worth = str(entry.get("worth") or "").strip() or "未知"
-        instructions = str(entry.get("instructions") or "").strip() or "见活动页面"
         lines = [
             f"截止时间: {end_text}",
             f"原价: {worth}",
-            f"领取方式: {instructions}",
-            f"活动链接: {url or '-'}",
         ]
         return NewsItem(
             gid=gid,
