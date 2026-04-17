@@ -14,9 +14,10 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from io import BytesIO
@@ -1157,6 +1158,27 @@ class SteamUpdatePush(Star):
     def _free_games_state_key() -> str:
         return "free_games_active_gids"
 
+    def _free_games_display_timezone_name(self) -> str:
+        return str(self._cfg("display_timezone", "")).strip()
+
+    @staticmethod
+    def _system_tzinfo():
+        return datetime.now().astimezone().tzinfo or timezone(timedelta())
+
+    def _get_display_timezone(self):
+        tz_name = self._free_games_display_timezone_name()
+        if not tz_name:
+            return self._system_tzinfo()
+        try:
+            return ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            self._log_warn(
+                "free_games",
+                "invalid display timezone, fallback to system",
+                tz_name=tz_name,
+            )
+            return self._system_tzinfo()
+
     @staticmethod
     def _parse_free_game_datetime(raw: Any) -> int:
         text = str(raw or "").strip()
@@ -1164,14 +1186,18 @@ class SteamUpdatePush(Star):
             return 0
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
             try:
-                return int(datetime.strptime(text, fmt).timestamp())
+                dt = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+                return int(dt.timestamp())
             except Exception:
                 continue
         try:
             iso_text = text.replace("Z", "+00:00")
             if "T" not in iso_text and " " in iso_text:
                 iso_text = iso_text.replace(" ", "T", 1)
-            return int(datetime.fromisoformat(iso_text).timestamp())
+            dt = datetime.fromisoformat(iso_text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
         except Exception:
             return 0
 
@@ -1229,7 +1255,7 @@ class SteamUpdatePush(Star):
         published_ts = self._parse_free_game_datetime(entry.get("published_date"))
         end_ts = self._parse_free_game_datetime(entry.get("end_date"))
         appid = str(appid or self._extract_free_game_appid(entry)).strip()
-        end_text = self._format_time(end_ts) if end_ts else (str(entry.get("end_date") or "").strip() or "未知")
+        end_text = self._format_free_game_time(end_ts) if end_ts else (str(entry.get("end_date") or "").strip() or "未知")
         worth = str(entry.get("worth") or "").strip() or "未知"
         instructions = str(entry.get("instructions") or "").strip() or "见活动页面"
         lines = [
@@ -3213,6 +3239,11 @@ class SteamUpdatePush(Star):
         if not ts:
             return ""
         return datetime.fromtimestamp(ts).strftime("%Y/%m/%d %H:%M")
+
+    def _format_free_game_time(self, ts: int) -> str:
+        if not ts:
+            return ""
+        return datetime.fromtimestamp(ts, self._get_display_timezone()).strftime("%Y/%m/%d %H:%M")
 
     # --- font ---
     def _load_font(self, size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
