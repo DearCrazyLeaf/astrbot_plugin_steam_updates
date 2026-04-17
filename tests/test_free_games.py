@@ -4,6 +4,7 @@ import json
 import sys
 import types
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -268,6 +269,22 @@ class FreeGamesLogicTest(unittest.TestCase):
         self.assertTrue(active)
         self.assertFalse(expired)
 
+    def test_is_free_game_active_uses_utc_source_time_independent_of_display_timezone(self):
+        plugin = self._make_plugin()
+        plugin._cfg = lambda key, default=None: {"display_timezone": "Asia/Shanghai"}.get(key, default)
+
+        active = plugin._is_free_game_active(
+            {"status": "Active", "end_date": "2026-04-10 08:00:00"},
+            now_ts=1_775_811_199,
+        )
+        expired = plugin._is_free_game_active(
+            {"status": "Active", "end_date": "2026-04-10 08:00:00"},
+            now_ts=1_775_811_200,
+        )
+
+        self.assertTrue(active)
+        self.assertFalse(expired)
+
     def test_free_game_entry_to_news_maps_required_fields(self):
         plugin = self._make_plugin()
         item = plugin._free_game_entry_to_news(
@@ -292,6 +309,54 @@ class FreeGamesLogicTest(unittest.TestCase):
         self.assertIn("原价:", item.contents)
         self.assertIn("领取方式:", item.contents)
         self.assertIn("活动链接:", item.contents)
+
+    def test_free_game_entry_to_news_compacts_contents_and_formats_deadline_in_display_timezone(self):
+        plugin = self._make_plugin()
+        config = {"display_timezone": "Asia/Shanghai"}
+        plugin._cfg = lambda key, default=None: config.get(key, default)
+
+        item = plugin._free_game_entry_to_news(
+            {
+                "id": 9001,
+                "title": "Portal",
+                "worth": "$19.99",
+                "thumbnail": "https://example.com/portal.jpg",
+                "open_giveaway_url": "https://example.com/giveaway/portal",
+                "published_date": "2026-04-07 08:00:00",
+                "end_date": "2026-04-10 08:00:00",
+                "instructions": "Install and claim",
+                "status": "Active",
+            },
+            official_name="传送门",
+        )
+
+        self.assertIn("截止时间: 2026/04/10 16:00", item.contents)
+        self.assertIn("原价: $19.99", item.contents)
+        self.assertNotIn("领取方式:", item.contents)
+        self.assertNotIn("活动链接:", item.contents)
+
+    def test_get_display_timezone_uses_system_timezone_when_config_empty(self):
+        plugin = self._make_plugin()
+        plugin._cfg = lambda key, default=None: {"display_timezone": ""}.get(key, default)
+
+        tzinfo = plugin._get_display_timezone()
+        expected_offset = datetime.now().astimezone().utcoffset()
+        actual_offset = datetime.now(tzinfo).utcoffset()
+
+        self.assertEqual(actual_offset, expected_offset)
+
+    def test_get_display_timezone_falls_back_to_system_when_value_invalid(self):
+        plugin = self._make_plugin()
+        warnings = []
+        plugin._cfg = lambda key, default=None: {"display_timezone": "Mars/Olympus"}.get(key, default)
+        plugin._log_warn = lambda *args, **kwargs: warnings.append((args, kwargs))
+
+        tzinfo = plugin._get_display_timezone()
+        expected_offset = datetime.now().astimezone().utcoffset()
+        actual_offset = datetime.now(tzinfo).utcoffset()
+
+        self.assertEqual(actual_offset, expected_offset)
+        self.assertTrue(warnings)
 
     def test_free_game_entry_prefers_resolved_store_url_and_appid(self):
         plugin = self._make_plugin()
