@@ -1188,13 +1188,13 @@ class SteamUpdatePush(Star):
                 return None
             try:
                 return ZoneInfo(tz_name)
-            except ZoneInfoNotFoundError:
+            except (ZoneInfoNotFoundError, ValueError):
                 zone_name = _zoneinfo_name_from_path(tz_name)
                 if not zone_name:
                     return None
                 try:
                     return ZoneInfo(zone_name)
-                except ZoneInfoNotFoundError:
+                except (ZoneInfoNotFoundError, ValueError):
                     return None
 
         for candidate in (
@@ -1225,9 +1225,16 @@ class SteamUpdatePush(Star):
                 if tzinfo is not None:
                     return tzinfo
 
+        localtime_path = Path("/etc/localtime")
         tzinfo = _load_zoneinfo("/etc/localtime")
         if tzinfo is not None:
             return tzinfo
+        if localtime_path.is_file():
+            try:
+                with localtime_path.open("rb") as fh:
+                    return ZoneInfo.from_file(fh)
+            except Exception:
+                pass
 
         return datetime.now().astimezone().tzinfo or timezone.utc
 

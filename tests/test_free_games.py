@@ -3,11 +3,14 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 import time
 import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
+from zoneinfo import TZPATH
 
 
 PLUGIN_PATH = Path("/mnt/s/Projects/astrbot_plugin_steam_updates/main.py")
@@ -393,6 +396,50 @@ class FreeGamesLogicTest(unittest.TestCase):
             else:
                 os.environ["TZ"] = original_tz
             time.tzset()
+
+    def test_get_display_timezone_falls_back_to_localtime_file_rules(self):
+        zoneinfo_source = None
+        for base in TZPATH:
+            candidate = Path(base) / "America/New_York"
+            if candidate.is_file():
+                zoneinfo_source = candidate
+                break
+        if zoneinfo_source is None:
+            self.skipTest("America/New_York zoneinfo file unavailable")
+
+        plugin = self._make_plugin()
+        plugin._cfg = lambda key, default=None: {"display_timezone": ""}.get(key, default)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            localtime_path = tmpdir_path / "localtime"
+            localtime_path.write_bytes(zoneinfo_source.read_bytes())
+
+            def _fake_path(value):
+                text = str(value)
+                if text == "/etc/localtime":
+                    return localtime_path
+                if text in {"/etc/timezone", "/etc/sysconfig/clock", "/etc/conf.d/clock"}:
+                    return tmpdir_path / text.strip("/").replace("/", "_")
+                return Path(value)
+
+            with patch.dict(self.mod.os.environ, {"TZ": ""}, clear=False):
+                with patch.object(self.mod, "Path", new=_fake_path):
+                    winter_ts = int(
+                        datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc).timestamp()
+                    )
+                    summer_ts = int(
+                        datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc).timestamp()
+                    )
+
+                    self.assertEqual(
+                        plugin._format_free_game_time(winter_ts),
+                        "2026/01/10 07:00",
+                    )
+                    self.assertEqual(
+                        plugin._format_free_game_time(summer_ts),
+                        "2026/07/10 08:00",
+                    )
 
     def test_free_game_entry_prefers_resolved_store_url_and_appid(self):
         plugin = self._make_plugin()
