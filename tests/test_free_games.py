@@ -1,7 +1,9 @@
 import asyncio
 import importlib.util
 import json
+import os
 import sys
+import time
 import types
 import unittest
 from datetime import datetime, timezone
@@ -357,6 +359,40 @@ class FreeGamesLogicTest(unittest.TestCase):
 
         self.assertEqual(actual_offset, expected_offset)
         self.assertTrue(warnings)
+
+    def test_get_display_timezone_uses_tz_env_with_dst_rules(self):
+        if not hasattr(time, "tzset"):
+            self.skipTest("tzset unavailable")
+
+        plugin = self._make_plugin()
+        plugin._cfg = lambda key, default=None: {"display_timezone": ""}.get(key, default)
+        original_tz = os.environ.get("TZ")
+
+        try:
+            os.environ["TZ"] = "America/New_York"
+            time.tzset()
+
+            winter_ts = int(
+                datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc).timestamp()
+            )
+            summer_ts = int(
+                datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc).timestamp()
+            )
+
+            self.assertEqual(
+                plugin._format_free_game_time(winter_ts),
+                "2026/01/10 07:00",
+            )
+            self.assertEqual(
+                plugin._format_free_game_time(summer_ts),
+                "2026/07/10 08:00",
+            )
+        finally:
+            if original_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = original_tz
+            time.tzset()
 
     def test_free_game_entry_prefers_resolved_store_url_and_appid(self):
         plugin = self._make_plugin()

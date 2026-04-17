@@ -1163,7 +1163,73 @@ class SteamUpdatePush(Star):
 
     @staticmethod
     def _system_tzinfo():
-        return datetime.now().astimezone().tzinfo or timezone(timedelta())
+        def _zoneinfo_name_from_path(path_text: str) -> str:
+            raw = str(path_text or "").strip()
+            if not raw:
+                return ""
+            path = Path(raw)
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            parts = resolved.parts
+            for idx, part in enumerate(parts):
+                if part == "zoneinfo" and idx + 1 < len(parts):
+                    return "/".join(parts[idx + 1 :])
+            return ""
+
+        def _load_zoneinfo(candidate: str):
+            tz_name = str(candidate or "").strip()
+            if not tz_name:
+                return None
+            if tz_name.startswith(":"):
+                tz_name = tz_name[1:].strip()
+            if not tz_name:
+                return None
+            try:
+                return ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                zone_name = _zoneinfo_name_from_path(tz_name)
+                if not zone_name:
+                    return None
+                try:
+                    return ZoneInfo(zone_name)
+                except ZoneInfoNotFoundError:
+                    return None
+
+        for candidate in (
+            os.environ.get("TZ", ""),
+            Path("/etc/timezone").read_text(encoding="utf-8", errors="ignore").strip()
+            if Path("/etc/timezone").is_file()
+            else "",
+        ):
+            tzinfo = _load_zoneinfo(candidate)
+            if tzinfo is not None:
+                return tzinfo
+
+        for config_path in (Path("/etc/sysconfig/clock"), Path("/etc/conf.d/clock")):
+            if not config_path.is_file():
+                continue
+            try:
+                lines = config_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            for line in lines:
+                match = re.match(
+                    r'^\s*(?:ZONE|TIMEZONE)\s*=\s*["\']?([^"\']+)["\']?\s*$',
+                    line,
+                )
+                if not match:
+                    continue
+                tzinfo = _load_zoneinfo(match.group(1))
+                if tzinfo is not None:
+                    return tzinfo
+
+        tzinfo = _load_zoneinfo("/etc/localtime")
+        if tzinfo is not None:
+            return tzinfo
+
+        return datetime.now().astimezone().tzinfo or timezone.utc
 
     def _get_display_timezone(self):
         tz_name = self._free_games_display_timezone_name()
