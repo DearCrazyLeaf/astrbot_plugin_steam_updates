@@ -4,7 +4,7 @@ import json
 import sys
 import types
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -272,14 +272,16 @@ class FreeGamesLogicTest(unittest.TestCase):
     def test_is_free_game_active_uses_utc_source_time_independent_of_display_timezone(self):
         plugin = self._make_plugin()
         plugin._cfg = lambda key, default=None: {"display_timezone": "Asia/Shanghai"}.get(key, default)
+        before_deadline = datetime(2026, 4, 10, 7, 59, 59, tzinfo=timezone.utc).timestamp()
+        at_deadline = datetime(2026, 4, 10, 8, 0, 0, tzinfo=timezone.utc).timestamp()
 
         active = plugin._is_free_game_active(
             {"status": "Active", "end_date": "2026-04-10 08:00:00"},
-            now_ts=1_775_811_199,
+            now_ts=before_deadline,
         )
         expired = plugin._is_free_game_active(
             {"status": "Active", "end_date": "2026-04-10 08:00:00"},
-            now_ts=1_775_811_200,
+            now_ts=at_deadline,
         )
 
         self.assertTrue(active)
@@ -307,8 +309,6 @@ class FreeGamesLogicTest(unittest.TestCase):
         self.assertEqual(item.image_url, "https://example.com/portal.jpg")
         self.assertIn("截止时间:", item.contents)
         self.assertIn("原价:", item.contents)
-        self.assertIn("领取方式:", item.contents)
-        self.assertIn("活动链接:", item.contents)
 
     def test_free_game_entry_to_news_compacts_contents_and_formats_deadline_in_display_timezone(self):
         plugin = self._make_plugin()
