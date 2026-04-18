@@ -2596,7 +2596,10 @@ class SteamUpdatePush(Star):
                 continue
             for item in sec.updates:
                 lines.append(f"- {item.title}")
-                summary = self._summarize_text(item.contents, max_chars)
+                if is_free_games_sec:
+                    summary = self._summarize_free_game_text(item.contents, max_chars)
+                else:
+                    summary = self._summarize_text(item.contents, max_chars)
                 if summary:
                     lines.append(summary)
                 if not is_free_games_sec:
@@ -2935,7 +2938,10 @@ class SteamUpdatePush(Star):
                     if title_blocks:
                         title_blocks[-1].gap = 8
                         blocks.extend(title_blocks)
-            summary = self._summarize_text(item.contents, max_chars)
+            if is_free_games_sec:
+                summary = self._summarize_free_game_text(item.contents, max_chars)
+            else:
+                summary = self._summarize_text(item.contents, max_chars)
             if summary:
                 blocks.extend(self._wrap_blocks(summary, body_font, body_color, max_text_width))
 
@@ -3045,6 +3051,39 @@ class SteamUpdatePush(Star):
         if len(clean) > max_chars:
             clean = clean[: max_chars - 3].rstrip() + "..."
         return clean
+
+    def _summarize_free_game_text(self, text: str, max_chars: int) -> str:
+        clean = self._format_news_text(text)
+        if not clean:
+            return ""
+
+        lines = [line.strip() for line in clean.splitlines() if line.strip()]
+        keepers: list[str] = []
+        for prefix in ("截止时间:", "原价:"):
+            matched = next((line for line in lines if line.startswith(prefix)), "")
+            if matched:
+                keepers.append(matched)
+
+        if not keepers:
+            banned_parts = (
+                "领取方式",
+                "活动链接",
+                "http://",
+                "https://",
+                "Click the button to visit the giveaway page",
+                "Download this game directly via Steam",
+                "That's it! Have fun!",
+            )
+            fallback_lines = [
+                line for line in lines
+                if not any(part in line for part in banned_parts)
+            ]
+            keepers = fallback_lines[:2]
+
+        summary = "\n".join(keepers).strip()
+        if len(summary) > max_chars:
+            summary = summary[: max_chars - 3].rstrip() + "..."
+        return summary
 
 
     def _format_news_text(self, text: str) -> str:
