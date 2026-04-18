@@ -2588,6 +2588,7 @@ class SteamUpdatePush(Star):
         lines.append("")
         max_chars = int(self._cfg("content_max_chars", 800))
         for sec in sections:
+            is_free_games_sec = str(sec.appid).strip().lower() == "free_games"
             lines.append(f"【{sec.title}】")
             if not sec.updates:
                 lines.append("暂无更新")
@@ -2598,11 +2599,12 @@ class SteamUpdatePush(Star):
                 summary = self._summarize_text(item.contents, max_chars)
                 if summary:
                     lines.append(summary)
-                date_text = self._format_time(item.date)
-                if date_text:
-                    lines.append(f"发布于：{date_text}")
-                if item.url:
-                    lines.append(f"链接：{item.url}")
+                if not is_free_games_sec:
+                    date_text = self._format_time(item.date)
+                    if date_text:
+                        lines.append(f"发布于：{date_text}")
+                    if item.url:
+                        lines.append(f"链接：{item.url}")
                 lines.append("")
         return "\n".join(lines).strip()
 
@@ -2950,12 +2952,13 @@ class SteamUpdatePush(Star):
                     if img:
                         img = self._scale_image(img, image_max_width, max_img_h)
                         blocks.append(RenderBlock("image", image=img, gap=10))
-            date_text = self._format_time(item.date)
-            if date_text:
-                blocks.append(RenderBlock("text", "", small_font, muted, 4))
-                blocks.append(RenderBlock("text", f"发布于：{date_text}", small_font, muted, 10))
-            if item.url:
-                blocks.append(RenderBlock("text", f"{item.url}", small_font, muted, 14))
+            if not is_free_games_sec:
+                date_text = self._format_time(item.date)
+                if date_text:
+                    blocks.append(RenderBlock("text", "", small_font, muted, 4))
+                    blocks.append(RenderBlock("text", f"发布于：{date_text}", small_font, muted, 10))
+                if item.url:
+                    blocks.append(RenderBlock("text", f"{item.url}", small_font, muted, 14))
             if is_workshop_sec:
                 for url in image_urls:
                     img = image_map.get(url)

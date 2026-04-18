@@ -340,6 +340,79 @@ class FreeGamesLogicTest(unittest.TestCase):
         self.assertNotIn("领取方式:", item.contents)
         self.assertNotIn("活动链接:", item.contents)
 
+    def test_build_text_message_omits_publish_time_and_link_for_free_games(self):
+        plugin = self._make_plugin()
+        sections = [
+            self.mod.AppSection(
+                "free_games",
+                "限时免费领取",
+                [
+                    self.mod.NewsItem(
+                        "9001",
+                        "Portal（传送门）",
+                        "https://store.steampowered.com/app/400/",
+                        "截止时间: 2026/04/10 16:00\n原价: $19.99",
+                        1_775_536_800,
+                    )
+                ],
+            )
+        ]
+
+        text = plugin._build_text_message(sections, "2026/04/07 12:00")
+
+        self.assertIn("Portal（传送门）", text)
+        self.assertIn("截止时间: 2026/04/10 16:00", text)
+        self.assertIn("原价: $19.99", text)
+        self.assertNotIn("发布于：", text)
+        self.assertNotIn("链接：", text)
+
+    def test_build_section_blocks_omits_publish_time_and_link_for_free_games(self):
+        plugin = self._make_plugin()
+        plugin._load_font = lambda size, bold=False: types.SimpleNamespace(size=size)
+        plugin._wrap_blocks = (
+            lambda text, font, color, max_width: [self.mod.RenderBlock("text", text, font, color, 0)] if text else []
+        )
+        plugin._summarize_text = lambda text, max_chars: text
+        plugin._scale_image = lambda img, width, height: img
+
+        section_title_font = types.SimpleNamespace(size=26)
+        body_font = types.SimpleNamespace(size=18)
+        small_font = types.SimpleNamespace(size=14)
+        blocks = plugin._build_section_blocks(
+            self.mod.AppSection(
+                "free_games",
+                "限时免费领取",
+                [
+                    self.mod.NewsItem(
+                        "9001",
+                        "Portal（传送门）",
+                        "https://store.steampowered.com/app/400/",
+                        "截止时间: 2026/04/10 16:00\n原价: $19.99",
+                        1_775_536_800,
+                    )
+                ],
+            ),
+            600,
+            section_title_font,
+            body_font,
+            (255, 255, 255),
+            small_font,
+            (150, 150, 150),
+            (102, 192, 244),
+            {},
+            600,
+            300,
+            800,
+            1,
+            {},
+        )
+
+        texts = [block.text for block in blocks if block.kind == "text" and block.text]
+        self.assertIn("Portal（传送门）", texts)
+        self.assertIn("截止时间: 2026/04/10 16:00\n原价: $19.99", texts)
+        self.assertFalse(any(text.startswith("发布于：") for text in texts))
+        self.assertNotIn("https://store.steampowered.com/app/400/", texts)
+
     def test_get_display_timezone_uses_system_timezone_when_config_empty(self):
         plugin = self._make_plugin()
         plugin._cfg = lambda key, default=None: {"display_timezone": ""}.get(key, default)
