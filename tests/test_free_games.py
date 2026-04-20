@@ -243,12 +243,17 @@ class FreeGamesLogicTest(unittest.TestCase):
         plugin._push_image = self._async_return(True)
         plugin._push_text = self._async_return(True)
         plugin._next_trace_id = lambda prefix: f"{prefix}-test"
+        plugin._is_current_poll_instance = lambda: True
         return plugin
 
     def test_format_free_game_title_appends_official_name(self):
         plugin = self._make_plugin()
         title = plugin._format_free_game_title("Portal", "传送门")
         self.assertEqual(title, "Portal（传送门）")
+
+    def test_module_exposes_main_alias_for_legacy_loader(self):
+        self.assertTrue(hasattr(self.mod, "Main"))
+        self.assertTrue(issubclass(self.mod.Main, self.mod.SteamUpdatePush))
 
     def test_format_free_game_title_skips_duplicate_name(self):
         plugin = self._make_plugin()
@@ -863,6 +868,112 @@ class FreeGamesLogicTest(unittest.TestCase):
             plugin._saved_state["free_games_active_gids"],
             json.dumps(["free-old"], ensure_ascii=False),
         )
+
+    def test_poll_once_skips_when_poll_instance_is_stale(self):
+        plugin = self._make_poll_plugin(
+            updates_by_app={
+                "730": [self.mod.NewsItem("n1", "Patch", "u1", "body", 100)]
+            },
+            free_items=[self.mod.NewsItem("free-new", "Portal", "u2", "c2", 200)],
+            previous_free_gids=[],
+            workshop_updates=[],
+        )
+        plugin._is_current_poll_instance = lambda: False
+        calls = {"fetch_news": 0, "save_state": 0}
+
+        async def _fetch_news(*args, **kwargs):
+            calls["fetch_news"] += 1
+            return []
+
+        plugin._fetch_news = _fetch_news
+        plugin._save_state = lambda state: calls.__setitem__("save_state", calls["save_state"] + 1)
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertEqual(calls["fetch_news"], 0)
+        self.assertEqual(calls["save_state"], 0)
+
+    def test_is_current_poll_instance_checks_claim_file_token(self):
+        plugin = self._make_plugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            plugin._data_dir = data_dir
+            plugin._poll_instance_token = "token-current"
+            token_path = data_dir / ".poll.instance"
+            token_path.write_text("token-other", encoding="utf-8")
+
+            self.assertFalse(plugin._is_current_poll_instance())
+
+    def test_poll_once_aborts_before_push_when_instance_becomes_stale(self):
+        plugin = self._make_poll_plugin(
+            updates_by_app={
+                "730": [self.mod.NewsItem("n1", "Patch", "u1", "body", 100)]
+            },
+            free_items=[self.mod.NewsItem("free-new", "Portal", "u2", "c2", 200)],
+            previous_free_gids=[],
+            workshop_updates=[],
+        )
+        checks = {"count": 0}
+        calls = {"push_image": 0, "save_state": 0}
+
+        def _is_current_poll_instance():
+            checks["count"] += 1
+            return checks["count"] == 1
+
+        async def _push_image(*args, **kwargs):
+            calls["push_image"] += 1
+            return True
+
+        plugin._is_current_poll_instance = _is_current_poll_instance
+        plugin._push_image = _push_image
+        plugin._save_state = lambda state: calls.__setitem__("save_state", calls["save_state"] + 1)
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertEqual(calls["push_image"], 0)
+        self.assertEqual(calls["save_state"], 0)
+        self.assertEqual(plugin._render_payloads, [])
+
+    def test_cancel_legacy_poll_tasks_cancels_matching_tasks(self):
+        plugin = self._make_plugin()
+        plugin._data_dir = Path("/tmp/astrbot_plugin_steam_updates_tests")
+        owner_cls = type("SteamUpdatePush", (), {})
+
+        class _Coro:
+            def __init__(self, qualname, owner=None):
+                self.__qualname__ = qualname
+                self.cr_frame = (
+                    types.SimpleNamespace(f_locals={"self": owner})
+                    if owner is not None
+                    else None
+                )
+
+        class _Task:
+            def __init__(self, coro):
+                self._coro = coro
+                self.cancelled = False
+
+            def get_coro(self):
+                return self._coro
+
+            def cancel(self):
+                self.cancelled = True
+
+        matching_owner = owner_cls()
+        matching_owner._data_dir = plugin._data_dir
+        other_owner = owner_cls()
+        other_owner._data_dir = Path("/tmp/other_plugin")
+        matching_task = _Task(_Coro("SteamUpdatePush._poll_loop", matching_owner))
+        other_task = _Task(_Coro("SteamUpdatePush._poll_loop", other_owner))
+        unrelated_task = _Task(_Coro("SteamUpdatePush._manual_query", matching_owner))
+
+        with patch.object(self.mod.asyncio, "all_tasks", return_value={matching_task, other_task, unrelated_task}):
+            cancelled = plugin._cancel_legacy_poll_tasks()
+
+        self.assertEqual(cancelled, 1)
+        self.assertTrue(matching_task.cancelled)
+        self.assertFalse(other_task.cancelled)
+        self.assertFalse(unrelated_task.cancelled)
 
     def test_manual_query_returns_free_games_when_no_appids(self):
         plugin = self._make_plugin()

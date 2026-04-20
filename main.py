@@ -10,6 +10,7 @@ import math
 import os
 import re
 import time
+import uuid
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
@@ -121,10 +122,14 @@ class SteamUpdatePush(Star):
         self._poll_lock_path = self._data_dir / ".poll.lock"
         self._poll_lock_fd: int | None = None
         self._poll_lock_owner = False
+        self._poll_instance_path = self._data_dir / ".poll.instance"
+        self._poll_instance_token = ""
 
     # --- lifecycle ---
     async def initialize(self):
         await self._ensure_http_client()
+        self._cancel_legacy_poll_tasks()
+        self._claim_poll_instance()
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def terminate(self):
@@ -132,6 +137,7 @@ class SteamUpdatePush(Star):
         if self._poll_task:
             self._poll_task.cancel()
         self._release_poll_lock()
+        self._release_poll_instance_claim()
         if self._client:
             await self._client.aclose()
         self._client = None
@@ -174,6 +180,82 @@ class SteamUpdatePush(Star):
             os.close(fd)
         except Exception as exc:
             self._log_warn("poll", "poll lock close failed", error=exc)
+
+    def _get_poll_instance_path(self) -> Path:
+        path = getattr(self, "_poll_instance_path", None)
+        if isinstance(path, Path):
+            return path
+        data_dir = getattr(self, "_data_dir", None)
+        if isinstance(data_dir, Path):
+            return data_dir / ".poll.instance"
+        return Path(".poll.instance")
+
+    @staticmethod
+    def _new_poll_instance_token() -> str:
+        return f"{os.getpid()}-{uuid.uuid4().hex}"
+
+    def _claim_poll_instance(self) -> None:
+        token = self._new_poll_instance_token()
+        path = self._get_poll_instance_path()
+        self._poll_instance_token = token
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(token, encoding="utf-8")
+        except Exception as exc:
+            self._log_warn("poll", "poll instance claim failed", error=exc)
+
+    def _release_poll_instance_claim(self) -> None:
+        token = str(getattr(self, "_poll_instance_token", "")).strip()
+        if not token:
+            return
+        path = self._get_poll_instance_path()
+        try:
+            current_token = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+            if current_token == token:
+                path.unlink(missing_ok=True)
+        except Exception as exc:
+            self._log_warn("poll", "poll instance release failed", error=exc)
+        self._poll_instance_token = ""
+
+    def _is_current_poll_instance(self) -> bool:
+        token = str(getattr(self, "_poll_instance_token", "")).strip()
+        if not token:
+            return True
+        path = self._get_poll_instance_path()
+        try:
+            claimed_token = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return False
+        except Exception as exc:
+            self._log_warn("poll", "poll instance read failed", error=exc)
+            return False
+        return claimed_token == token
+
+    def _cancel_legacy_poll_tasks(self) -> int:
+        cancelled = 0
+        for task in asyncio.all_tasks():
+            try:
+                coro = task.get_coro()
+            except Exception:
+                continue
+            qualname = str(getattr(coro, "__qualname__", "") or "")
+            if not qualname.endswith("SteamUpdatePush._poll_loop"):
+                continue
+            frame = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None)
+            owner = frame.f_locals.get("self") if frame and getattr(frame, "f_locals", None) else None
+            if owner is None:
+                continue
+            owner_dir = getattr(owner, "_data_dir", None)
+            if owner_dir != self._data_dir:
+                continue
+            try:
+                task.cancel()
+                cancelled += 1
+            except Exception as exc:
+                self._log_warn("poll", "legacy poll task cancel failed", error=exc)
+        if cancelled:
+            self._log_warn("poll", "cancelled legacy poll tasks", count=cancelled)
+        return cancelled
 
     # --- config helpers ---
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -567,6 +649,10 @@ class SteamUpdatePush(Star):
     # --- polling ---
     async def _poll_loop(self):
         while not self._stop_event.is_set():
+            if not self._is_current_poll_instance():
+                self._release_poll_lock()
+                self._log_warn("poll", "stale poll instance detected; exiting loop")
+                break
             now = datetime.now().astimezone()
             next_run = self._next_poll_time(now)
             wait_sec = max(0, (next_run - now).total_seconds())
@@ -577,6 +663,10 @@ class SteamUpdatePush(Star):
                     break
             except asyncio.TimeoutError:
                 pass
+            if not self._is_current_poll_instance():
+                self._release_poll_lock()
+                self._log_warn("poll", "stale poll instance detected before execution")
+                break
             if not self._try_acquire_poll_lock():
                 self._log_debug("poll", "skip: lock held by another instance")
                 continue
@@ -589,6 +679,9 @@ class SteamUpdatePush(Star):
         await self._ensure_http_client()
         trace = self._next_trace_id("poll")
         self._log_debug("poll", "start", trace=trace)
+        if not self._is_current_poll_instance():
+            self._log_warn("poll", "skip: stale poll instance", trace=trace)
+            return
         if not bool(self._cfg("enable_push", True)):
             self._log_debug("poll", "skip: plugin disabled", trace=trace)
             return
@@ -719,6 +812,9 @@ class SteamUpdatePush(Star):
                 state.update(workshop_state_updates)
             if free_game_state_updates:
                 state.update(free_game_state_updates)
+            if not self._is_current_poll_instance():
+                self._log_warn("poll", "skip state update: stale poll instance", trace=trace)
+                return
             self._save_state(state)
             return
         self._log_debug(
@@ -732,6 +828,9 @@ class SteamUpdatePush(Star):
             free_game_standalone_count=len(selected_free_game_items.standalone_items),
             groups=len(group_ids),
         )
+        if not self._is_current_poll_instance():
+            self._log_warn("poll", "abort push: stale poll instance", trace=trace)
+            return
 
         payload_batches: list[tuple[str, list[AppSection]]] = []
         if updates_by_app:
@@ -815,6 +914,9 @@ class SteamUpdatePush(Star):
         if free_game_state_updates:
             state.update(free_game_state_updates)
 
+        if not self._is_current_poll_instance():
+            self._log_warn("poll", "skip final state update: stale poll instance", trace=trace)
+            return
         self._save_state(state)
         self._log_debug("poll", "state updated", trace=trace, state_size=len(state))
 
@@ -3687,3 +3789,7 @@ class SteamUpdatePush(Star):
             has_bot=bool(self._last_bot),
         )
         yield event.plain_result("Steam 更新推送已就绪")
+
+
+class Main(SteamUpdatePush):
+    pass
