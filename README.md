@@ -35,6 +35,8 @@
 - **限时免费领取活动**：支持将当前仍可领取的 Steam 游戏作为独立分区“限时免费领取”并入游戏更新推送
 - **创意工坊订阅监控**：支持轮询 Workshop PublishedFileID，发现更新时间变化后推送，支持查询非公开创意工坊内容
 
+<img width="600" alt="free_games_preview" src="docs/images/free_games_preview.png" />
+
 <img width="900" height="1184" alt="preview" src="https://github.com/user-attachments/assets/59a296a5-23f8-428f-9a32-72e38f64289c" />
 
 <img width="900" height="847" alt="workshop_public_3240880604_v4_spacing" src="https://github.com/user-attachments/assets/74d16dc0-f15e-41e8-9d59-50b25dca6231" />
@@ -185,6 +187,8 @@ mixin:
 免费领取活动在文本模式和卡片模式下均不会额外显示发布时间与链接
 即使某一轮免费领取活动正文仍混入旧版“领取方式”或“活动链接”，渲染阶段也会自动裁剪，只保留“截止时间”和“原价”
 `display_timezone` 留空时跟随容器系统时区；填写 IANA 时区名时，活动源时间会先按 UTC 解释，再转换为目标时区显示截止时间
+免费领取活动数据来自 GamerPower 公开接口：`https://www.gamerpower.com/api/giveaways?platform=steam&type=game`
+该功能已经经过线上轮询与手动查询验证，可通过 `free_games_enable` 独立开启或关闭
 
 ### 💬 手动查询
 群内发送任一配置指令即可触发，例如：
