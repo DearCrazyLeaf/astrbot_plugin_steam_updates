@@ -1,4 +1,8 @@
 import asyncio
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
 import hashlib
 import html
 import json
@@ -6,13 +10,15 @@ import math
 import os
 import re
 import time
+import uuid
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from io import BytesIO
@@ -33,6 +39,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 PLUGIN_ID = "astrbot_plugin_steam_updates"
 STEAM_NEWS_API = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/"
 STEAM_NEWS_FEED_API = "https://store.steampowered.com/feeds/news/app/{appid}/"
+FREE_GAMES_API = "https://www.gamerpower.com/api/giveaways?platform=steam&type=game"
 STEAM_WORKSHOP_DETAILS_API = "/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 STEAM_IMAGE_DOMAINS = {
     "steamcommunity.com",
@@ -78,6 +85,7 @@ class SteamUpdatePush(Star):
     _CFG_GROUP_KEYS = (
         "basic_settings",
         "game_updates",
+        "free_games",
         "workshop_updates",
         "manual_commands",
         "polling_settings",
@@ -111,20 +119,143 @@ class SteamUpdatePush(Star):
         self._image_fail_until: dict[str, float] = {}
         self._header_fail_until: dict[str, float] = {}
         self._last_workshop_url_network_error = False
+        self._poll_lock_path = self._data_dir / ".poll.lock"
+        self._poll_lock_fd: int | None = None
+        self._poll_lock_owner = False
+        self._poll_instance_path = self._data_dir / ".poll.instance"
+        self._poll_instance_token = ""
 
     # --- lifecycle ---
     async def initialize(self):
         await self._ensure_http_client()
+        self._cancel_legacy_poll_tasks()
+        self._claim_poll_instance()
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def terminate(self):
         self._stop_event.set()
         if self._poll_task:
             self._poll_task.cancel()
+        self._release_poll_lock()
+        self._release_poll_instance_claim()
         if self._client:
             await self._client.aclose()
         self._client = None
         self._client_signature = ""
+
+    def _try_acquire_poll_lock(self) -> bool:
+        if fcntl is None:
+            return True
+        if self._poll_lock_owner:
+            return True
+        try:
+            if self._poll_lock_fd is None:
+                self._poll_lock_path.parent.mkdir(parents=True, exist_ok=True)
+                self._poll_lock_fd = os.open(
+                    self._poll_lock_path,
+                    os.O_RDWR | os.O_CREAT,
+                    0o644,
+                )
+            fcntl.flock(self._poll_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._poll_lock_owner = True
+            return True
+        except BlockingIOError:
+            return False
+        except Exception as exc:
+            self._log_warn("poll", "poll lock acquire failed", error=exc)
+            return True
+
+    def _release_poll_lock(self) -> None:
+        fd = self._poll_lock_fd
+        self._poll_lock_owner = False
+        self._poll_lock_fd = None
+        if fd is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception as exc:
+            self._log_warn("poll", "poll lock release failed", error=exc)
+        try:
+            os.close(fd)
+        except Exception as exc:
+            self._log_warn("poll", "poll lock close failed", error=exc)
+
+    def _get_poll_instance_path(self) -> Path:
+        path = getattr(self, "_poll_instance_path", None)
+        if isinstance(path, Path):
+            return path
+        data_dir = getattr(self, "_data_dir", None)
+        if isinstance(data_dir, Path):
+            return data_dir / ".poll.instance"
+        return Path(".poll.instance")
+
+    @staticmethod
+    def _new_poll_instance_token() -> str:
+        return f"{os.getpid()}-{uuid.uuid4().hex}"
+
+    def _claim_poll_instance(self) -> None:
+        token = self._new_poll_instance_token()
+        path = self._get_poll_instance_path()
+        self._poll_instance_token = token
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(token, encoding="utf-8")
+        except Exception as exc:
+            self._log_warn("poll", "poll instance claim failed", error=exc)
+
+    def _release_poll_instance_claim(self) -> None:
+        token = str(getattr(self, "_poll_instance_token", "")).strip()
+        if not token:
+            return
+        path = self._get_poll_instance_path()
+        try:
+            current_token = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+            if current_token == token:
+                path.unlink(missing_ok=True)
+        except Exception as exc:
+            self._log_warn("poll", "poll instance release failed", error=exc)
+        self._poll_instance_token = ""
+
+    def _is_current_poll_instance(self) -> bool:
+        token = str(getattr(self, "_poll_instance_token", "")).strip()
+        if not token:
+            return True
+        path = self._get_poll_instance_path()
+        try:
+            claimed_token = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return False
+        except Exception as exc:
+            self._log_warn("poll", "poll instance read failed", error=exc)
+            return False
+        return claimed_token == token
+
+    def _cancel_legacy_poll_tasks(self) -> int:
+        cancelled = 0
+        for task in asyncio.all_tasks():
+            try:
+                coro = task.get_coro()
+            except Exception:
+                continue
+            qualname = str(getattr(coro, "__qualname__", "") or "")
+            if not qualname.endswith("SteamUpdatePush._poll_loop"):
+                continue
+            frame = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None)
+            owner = frame.f_locals.get("self") if frame and getattr(frame, "f_locals", None) else None
+            if owner is None:
+                continue
+            owner_dir = getattr(owner, "_data_dir", None)
+            if owner_dir != self._data_dir:
+                continue
+            try:
+                task.cancel()
+                cancelled += 1
+            except Exception as exc:
+                self._log_warn("poll", "legacy poll task cancel failed", error=exc)
+        if cancelled:
+            self._log_warn("poll", "cancelled legacy poll tasks", count=cancelled)
+        return cancelled
 
     # --- config helpers ---
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -309,6 +440,12 @@ class SteamUpdatePush(Star):
 
     def _enable_feed_fallback(self) -> bool:
         return bool(self._cfg("enable_feed_fallback", True))
+
+    def _free_games_enabled(self) -> bool:
+        return bool(self._cfg("free_games_enable", False))
+
+    def _free_games_manual_only_when_no_news(self) -> bool:
+        return bool(self._cfg("free_games_manual_only_when_no_news", True))
 
     def _get_feed_timeout_sec(self) -> int:
         try:
@@ -512,6 +649,10 @@ class SteamUpdatePush(Star):
     # --- polling ---
     async def _poll_loop(self):
         while not self._stop_event.is_set():
+            if not self._is_current_poll_instance():
+                self._release_poll_lock()
+                self._log_warn("poll", "stale poll instance detected; exiting loop")
+                break
             now = datetime.now().astimezone()
             next_run = self._next_poll_time(now)
             wait_sec = max(0, (next_run - now).total_seconds())
@@ -522,6 +663,13 @@ class SteamUpdatePush(Star):
                     break
             except asyncio.TimeoutError:
                 pass
+            if not self._is_current_poll_instance():
+                self._release_poll_lock()
+                self._log_warn("poll", "stale poll instance detected before execution")
+                break
+            if not self._try_acquire_poll_lock():
+                self._log_debug("poll", "skip: lock held by another instance")
+                continue
             try:
                 await self._poll_once()
             except Exception:
@@ -531,6 +679,9 @@ class SteamUpdatePush(Star):
         await self._ensure_http_client()
         trace = self._next_trace_id("poll")
         self._log_debug("poll", "start", trace=trace)
+        if not self._is_current_poll_instance():
+            self._log_warn("poll", "skip: stale poll instance", trace=trace)
+            return
         if not bool(self._cfg("enable_push", True)):
             self._log_debug("poll", "skip: plugin disabled", trace=trace)
             return
@@ -540,10 +691,11 @@ class SteamUpdatePush(Star):
             self._log_debug("poll", "skip: notify_group_ids empty", trace=trace)
             return
         appids = self._normalize_appids(self._cfg("steam_appids", []))
+        free_games_enabled = self._free_games_enabled()
         workshop_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
         workshop_enabled = self._workshop_enabled() and bool(workshop_ids)
-        if not appids and not workshop_enabled:
-            self._log_debug("poll", "skip: steam_appids and workshop_item_ids both empty", trace=trace)
+        if not appids and not workshop_enabled and not free_games_enabled:
+            self._log_debug("poll", "skip: steam_appids/workshop/free_games all empty", trace=trace)
             return
 
         state = self._load_state()
@@ -617,11 +769,53 @@ class SteamUpdatePush(Star):
                 state_update_count=len(workshop_state_updates),
             )
 
-        if not updates_by_app and not workshop_updates:
-            self._log_debug("poll", "no app/workshop has new updates", trace=trace)
+        free_game_items_result = await self._fetch_free_game_items() if free_games_enabled else []
+        free_game_items = list(free_game_items_result or [])
+        free_game_state_updates: dict[str, str] = {}
+        new_free_game_items: list[NewsItem] = []
+        selected_free_game_items = self.PollFreeGameSelection(
+            attached_items=[],
+            standalone_items=[],
+        )
+        if free_games_enabled and free_game_items_result is not None:
+            free_state_key = self._free_games_state_key()
+            previous_free_gids = self._decode_news_seen_state(state.get(free_state_key, ""))
+            new_free_game_items, free_snapshot = self._split_new_free_game_items(
+                free_game_items,
+                previous_free_gids,
+            )
+            selected_free_game_items = self._select_poll_free_game_items(
+                has_game_updates=bool(updates_by_app),
+                active_items=free_game_items,
+                new_items=new_free_game_items,
+            )
+            free_game_state_updates[free_state_key] = json.dumps(free_snapshot, ensure_ascii=False)
+            self._log_debug(
+                "free_games",
+                "poll collected",
+                trace=trace,
+                active_count=len(free_game_items),
+                new_count=len(new_free_game_items),
+                attached_count=len(selected_free_game_items.attached_items),
+                standalone_count=len(selected_free_game_items.standalone_items),
+            )
+        elif free_games_enabled:
+            self._log_debug(
+                "free_games",
+                "poll skipped snapshot update due fetch failure",
+                trace=trace,
+            )
+
+        if not updates_by_app and not workshop_updates and not selected_free_game_items.standalone_items:
+            self._log_debug("poll", "no app/workshop/standalone_free_game has updates", trace=trace)
             if workshop_state_updates:
                 state.update(workshop_state_updates)
-                self._save_state(state)
+            if free_game_state_updates:
+                state.update(free_game_state_updates)
+            if not self._is_current_poll_instance():
+                self._log_warn("poll", "skip state update: stale poll instance", trace=trace)
+                return
+            self._save_state(state)
             return
         self._log_debug(
             "poll",
@@ -629,14 +823,34 @@ class SteamUpdatePush(Star):
             trace=trace,
             app_count=len(updates_by_app),
             workshop_update_count=len(workshop_updates),
+            free_game_new_count=len(new_free_game_items),
+            free_game_attached_count=len(selected_free_game_items.attached_items),
+            free_game_standalone_count=len(selected_free_game_items.standalone_items),
             groups=len(group_ids),
         )
+        if not self._is_current_poll_instance():
+            self._log_warn("poll", "abort push: stale poll instance", trace=trace)
+            return
 
         payload_batches: list[tuple[str, list[AppSection]]] = []
         if updates_by_app:
             updated_appids = [aid for aid in appids if aid in updates_by_app]
-            game_sections = await self._build_sections(updated_appids, updates_by_app)
-            payload_batches.append(("game", game_sections))
+            game_sections = await self._build_sections(updated_appids, updates_by_app) if updated_appids else []
+            merged_game_sections = self._merge_game_sections_with_free_games(
+                game_sections,
+                selected_free_game_items.attached_items,
+                free_only_when_no_news=True,
+            )
+            if merged_game_sections:
+                payload_batches.append(("game", merged_game_sections))
+        elif selected_free_game_items.standalone_items:
+            free_only_sections = self._merge_game_sections_with_free_games(
+                [],
+                selected_free_game_items.standalone_items,
+                free_only_when_no_news=True,
+            )
+            if free_only_sections:
+                payload_batches.append(("game", free_only_sections))
         if workshop_updates:
             workshop_sections = await self._build_workshop_sections(workshop_updates)
             payload_batches.append(("workshop", workshop_sections))
@@ -686,6 +900,8 @@ class SteamUpdatePush(Star):
             trace=trace,
             app_count=len(updates_by_app),
             workshop_update_count=len(workshop_updates),
+            free_game_attached_count=len(selected_free_game_items.attached_items),
+            free_game_standalone_count=len(selected_free_game_items.standalone_items),
             payload_count=len(payload_batches),
             groups=len(group_ids),
         )
@@ -695,7 +911,12 @@ class SteamUpdatePush(Star):
             state.update(app_state_updates)
         if workshop_state_updates:
             state.update(workshop_state_updates)
+        if free_game_state_updates:
+            state.update(free_game_state_updates)
 
+        if not self._is_current_poll_instance():
+            self._log_warn("poll", "skip final state update: stale poll instance", trace=trace)
+            return
         self._save_state(state)
         self._log_debug("poll", "state updated", trace=trace, state_size=len(state))
 
@@ -707,22 +928,24 @@ class SteamUpdatePush(Star):
             kind = "all"
         want_game = kind in {"all", "game"}
         want_workshop = kind in {"all", "workshop"}
+        want_free_games = want_game and self._free_games_enabled()
 
         appids = self._normalize_appids(self._cfg("steam_appids", []))
         workshop_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
         workshop_enabled = want_workshop and self._workshop_enabled() and bool(workshop_ids)
+        game_source_available = bool(appids) or want_free_games
 
-        if want_game and not appids and not workshop_enabled:
-            self._log_warn("manual", "skip: no appids for game query", trace=trace, query_kind=kind)
+        if kind == "game" and not game_source_available:
+            self._log_warn("manual", "skip: no source for game query", trace=trace, query_kind=kind)
             if kind == "game":
-                return None, "\u672a\u914d\u7f6e\u6e38\u620f AppID\uff0c\u65e0\u6cd5\u67e5\u8be2"
+                return None, "\u672a\u914d\u7f6e\u6e38\u620f AppID \u6216\u672a\u542f\u7528\u9650\u65f6\u514d\u8d39\u9886\u53d6\uff0c\u65e0\u6cd5\u67e5\u8be2"
 
-        if want_workshop and not workshop_enabled and not appids:
+        if kind == "workshop" and not workshop_enabled:
             self._log_warn("manual", "skip: workshop disabled or ids empty", trace=trace, query_kind=kind)
             if kind == "workshop":
                 return None, "\u672a\u542f\u7528\u521b\u610f\u5de5\u574a\u8ba2\u9605\u76d1\u63a7\u6216\u672a\u914d\u7f6e\u8ba2\u9605ID\uff0c\u65e0\u6cd5\u67e5\u8be2"
 
-        if (not want_game or not appids) and not workshop_enabled:
+        if not game_source_available and not workshop_enabled:
             self._log_warn("manual", "skip: no effective source", trace=trace, query_kind=kind)
             return None, "\u672a\u914d\u7f6e\u53ef\u7528\u7684\u67e5\u8be2\u6e90\uff0c\u65e0\u6cd5\u67e5\u8be2"
 
@@ -751,8 +974,46 @@ class SteamUpdatePush(Star):
 
         workshop_all = await self._fetch_workshop_news_items() if workshop_enabled else []
         workshop_updates = self._filter_today_items(workshop_all) if workshop_all else []
+        free_game_items_result = await self._fetch_free_game_items() if want_free_games else []
+        free_game_items = list(free_game_items_result or [])
+
+        if want_game and free_game_items and not updates_by_app and not workshop_updates and self._free_games_manual_only_when_no_news():
+            self._log_debug(
+                "manual",
+                "free games only path used",
+                trace=trace,
+                query_kind=kind,
+                free_game_count=len(free_game_items),
+            )
+            game_sections = self._merge_game_sections_with_free_games(
+                [],
+                free_game_items,
+                free_only_when_no_news=True,
+            )
+            payload_batches = [("game", game_sections)] if game_sections else []
+            query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
+            mode = str(self._cfg("message_mode", "card")).lower()
+            results: list[bytes | str] = []
+            for card_kind, sections in payload_batches:
+                latest_ts = max(
+                    (item.date for sec in sections for item in sec.updates if item.date),
+                    default=int(datetime.now().timestamp()),
+                )
+                publish_text = datetime.fromtimestamp(latest_ts).strftime("%Y/%m/%d %H:%M")
+                if mode == "text":
+                    results.append(self._build_text_message(sections, publish_text))
+                    continue
+                image_bytes = await self._render_card(
+                    sections,
+                    publish_text,
+                    query_text,
+                    card_kind=card_kind,
+                )
+                results.append(image_bytes if image_bytes else self._build_text_message(sections, publish_text))
+            return results, None
 
         notice = ""
+        free_games_only_without_appids = bool(want_game and free_game_items and not appids)
         if not updates_by_app and not workshop_updates:
             if max_days > 1:
                 notice = f"\u6ca1\u6709\u627e\u5230\u5f53\u5929\u7684\u66f4\u65b0\u4fe1\u606f\uff0c\u4ee5\u4e0b\u662f\u6700\u8fd1 {max_days} \u5929\u7684\u66f4\u65b0\u5185\u5bb9"
@@ -786,12 +1047,21 @@ class SteamUpdatePush(Star):
                 query_kind=kind,
                 appids=",".join(appids),
             )
-            return None, "\u672a\u83b7\u53d6\u5230\u66f4\u65b0\u6570\u636e"
+            if not free_games_only_without_appids:
+                return None, "\u672a\u83b7\u53d6\u5230\u66f4\u65b0\u6570\u636e"
+            notice = ""
 
         payload_batches: list[tuple[str, list[AppSection]]] = []
-        if want_game and updates_by_app:
-            game_sections = await self._build_sections(appids, updates_by_app, umo)
-            payload_batches.append(("game", game_sections))
+        if want_game and (updates_by_app or free_game_items):
+            visible_appids = [appid for appid in appids if appid in updates_by_app]
+            game_sections = await self._build_sections(visible_appids, updates_by_app, umo) if visible_appids else []
+            merged_game_sections = self._merge_game_sections_with_free_games(
+                game_sections,
+                free_game_items,
+                free_only_when_no_news=self._free_games_manual_only_when_no_news() or not appids,
+            )
+            if merged_game_sections:
+                payload_batches.append(("game", merged_game_sections))
         if workshop_enabled:
             workshop_sections = await self._build_workshop_sections(workshop_updates)
             if workshop_sections:
@@ -986,6 +1256,277 @@ class SteamUpdatePush(Star):
             pass
         return [x.strip() for x in text.split(",") if x.strip()]
 
+    @staticmethod
+    def _free_games_state_key() -> str:
+        return "free_games_active_gids"
+
+    def _free_games_display_timezone_name(self) -> str:
+        return str(self._cfg("display_timezone", "")).strip()
+
+    @staticmethod
+    def _system_tzinfo():
+        def _zoneinfo_name_from_path(path_text: str) -> str:
+            raw = str(path_text or "").strip()
+            if not raw:
+                return ""
+            path = Path(raw)
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            parts = resolved.parts
+            for idx, part in enumerate(parts):
+                if part == "zoneinfo" and idx + 1 < len(parts):
+                    return "/".join(parts[idx + 1 :])
+            return ""
+
+        def _load_zoneinfo(candidate: str):
+            tz_name = str(candidate or "").strip()
+            if not tz_name:
+                return None
+            if tz_name.startswith(":"):
+                tz_name = tz_name[1:].strip()
+            if not tz_name:
+                return None
+            try:
+                return ZoneInfo(tz_name)
+            except (ZoneInfoNotFoundError, ValueError):
+                zone_name = _zoneinfo_name_from_path(tz_name)
+                if not zone_name:
+                    return None
+                try:
+                    return ZoneInfo(zone_name)
+                except (ZoneInfoNotFoundError, ValueError):
+                    return None
+
+        for candidate in (
+            os.environ.get("TZ", ""),
+            Path("/etc/timezone").read_text(encoding="utf-8", errors="ignore").strip()
+            if Path("/etc/timezone").is_file()
+            else "",
+        ):
+            tzinfo = _load_zoneinfo(candidate)
+            if tzinfo is not None:
+                return tzinfo
+
+        for config_path in (Path("/etc/sysconfig/clock"), Path("/etc/conf.d/clock")):
+            if not config_path.is_file():
+                continue
+            try:
+                lines = config_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            for line in lines:
+                match = re.match(
+                    r'^\s*(?:ZONE|TIMEZONE)\s*=\s*["\']?([^"\']+)["\']?\s*$',
+                    line,
+                )
+                if not match:
+                    continue
+                tzinfo = _load_zoneinfo(match.group(1))
+                if tzinfo is not None:
+                    return tzinfo
+
+        localtime_path = Path("/etc/localtime")
+        tzinfo = _load_zoneinfo("/etc/localtime")
+        if tzinfo is not None:
+            return tzinfo
+        if localtime_path.is_file():
+            try:
+                with localtime_path.open("rb") as fh:
+                    return ZoneInfo.from_file(fh)
+            except Exception:
+                pass
+
+        return datetime.now().astimezone().tzinfo or timezone.utc
+
+    def _get_display_timezone(self):
+        tz_name = self._free_games_display_timezone_name()
+        if not tz_name:
+            return self._system_tzinfo()
+        try:
+            return ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            self._log_warn(
+                "free_games",
+                "invalid display timezone, fallback to system",
+                tz_name=tz_name,
+            )
+            return self._system_tzinfo()
+
+    @staticmethod
+    def _parse_free_game_datetime(raw: Any) -> int:
+        text = str(raw or "").strip()
+        if not text or text.lower() in {"n/a", "null", "none"}:
+            return 0
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+                return int(dt.timestamp())
+            except Exception:
+                continue
+        try:
+            iso_text = text.replace("Z", "+00:00")
+            if "T" not in iso_text and " " in iso_text:
+                iso_text = iso_text.replace(" ", "T", 1)
+            dt = datetime.fromisoformat(iso_text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _format_free_game_title(title: str, official_name: str = "") -> str:
+        base = str(title or "").strip() or "未知游戏"
+        official = str(official_name or "").strip()
+        if not official or official.casefold() == base.casefold():
+            return base
+        return f"{base}（{official}）"
+
+    @staticmethod
+    def _extract_free_game_appid(entry: dict[str, Any]) -> str:
+        if not isinstance(entry, dict):
+            return ""
+        for key in ("_store_url", "store_url", "open_giveaway_url", "gamerpower_url", "description", "instructions"):
+            text = str(entry.get(key) or "").strip()
+            if not text:
+                continue
+            match = re.search(r"/app/(\d+)", text)
+            if match:
+                return match.group(1)
+        return ""
+
+    def _is_free_game_active(self, entry: dict[str, Any], now_ts: int | None = None) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        status = str(entry.get("status") or "").strip().lower()
+        if status and status != "active":
+            return False
+        end_ts = self._parse_free_game_datetime(entry.get("end_date"))
+        if end_ts <= 0:
+            return False
+        current_ts = int(now_ts if now_ts is not None else time.time())
+        return end_ts > current_ts
+
+    def _free_game_entry_to_news(
+        self,
+        entry: dict[str, Any],
+        official_name: str = "",
+        appid: str = "",
+    ) -> NewsItem:
+        title = self._format_free_game_title(entry.get("title", ""), official_name)
+        url = str(
+            entry.get("_store_url")
+            or entry.get("store_url")
+            or entry.get("open_giveaway_url")
+            or entry.get("gamerpower_url")
+            or ""
+        ).strip()
+        gid = str(entry.get("id") or "").strip() or url
+        if not gid:
+            raw = f"{title}|{entry.get('published_date') or ''}|{entry.get('end_date') or ''}"
+            gid = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+        published_ts = self._parse_free_game_datetime(entry.get("published_date"))
+        end_ts = self._parse_free_game_datetime(entry.get("end_date"))
+        appid = str(appid or self._extract_free_game_appid(entry)).strip()
+        end_text = self._format_free_game_time(end_ts) if end_ts else (str(entry.get("end_date") or "").strip() or "未知")
+        worth = str(entry.get("worth") or "").strip() or "未知"
+        lines = [
+            f"截止时间: {end_text}",
+            f"原价: {worth}",
+        ]
+        return NewsItem(
+            gid=gid,
+            title=title,
+            url=url,
+            contents="\n".join(lines),
+            date=published_ts or end_ts,
+            appid=appid,
+            image_url=str(entry.get("thumbnail") or "").strip(),
+        )
+
+    async def _resolve_free_game_store_url(self, url: str) -> str:
+        target = str(url or "").strip()
+        if not target or not self._client:
+            return ""
+        if "/app/" in target:
+            return target
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            resp = await self._request_with_network_fallback(
+                "GET",
+                target,
+                headers=headers,
+                timeout=10,
+                follow_redirects=False,
+            )
+            location = str(resp.headers.get("location") or "").strip()
+            if location and "/app/" in location:
+                return location
+        except Exception as exc:
+            self._log_debug("free_games", "store url resolve failed", url=target, error=self._exc_text(exc))
+        return ""
+
+    def _split_new_free_game_items(
+        self,
+        items: list[NewsItem],
+        previous_gids: list[str],
+    ) -> tuple[list[NewsItem], list[str]]:
+        previous = {str(gid).strip() for gid in previous_gids if str(gid).strip()}
+        snapshot: list[str] = []
+        snapshot_seen: set[str] = set()
+        new_items: list[NewsItem] = []
+        for item in items or []:
+            gid = str(item.gid or "").strip()
+            if not gid or gid in snapshot_seen:
+                continue
+            snapshot_seen.add(gid)
+            snapshot.append(gid)
+            if gid not in previous:
+                new_items.append(item)
+        return new_items, snapshot
+
+    @dataclass(frozen=True)
+    class PollFreeGameSelection:
+        attached_items: list[NewsItem]
+        standalone_items: list[NewsItem]
+
+    def _select_poll_free_game_items(
+        self,
+        has_game_updates: bool,
+        active_items: list[NewsItem],
+        new_items: list[NewsItem],
+    ) -> "SteamUpdatePush.PollFreeGameSelection":
+        if has_game_updates:
+            return self.PollFreeGameSelection(
+                attached_items=list(active_items or []),
+                standalone_items=[],
+            )
+        return self.PollFreeGameSelection(
+            attached_items=[],
+            standalone_items=list(new_items or []),
+        )
+
+    def _merge_game_sections_with_free_games(
+        self,
+        game_sections: list[AppSection],
+        free_game_items: list[NewsItem],
+        free_only_when_no_news: bool,
+    ) -> list[AppSection]:
+        merged = list(game_sections or [])
+        if not free_game_items:
+            return merged
+        free_section = AppSection(
+            appid="free_games",
+            title="限时免费领取",
+            updates=list(free_game_items),
+        )
+        if merged:
+            merged.append(free_section)
+            return merged
+        return [free_section] if free_only_when_no_news else []
+
     async def _fetch_news(self, appid: str, count: int, only_today: bool = True) -> list[NewsItem]:
         if not self._client:
             self._log_warn("fetch", "http client not ready", appid=appid)
@@ -1018,6 +1559,87 @@ class SteamUpdatePush(Star):
             return filtered
 
         self._log_debug("fetch", "news fetched", appid=appid, source=source, total=len(items))
+        return items
+
+    async def _fetch_free_game_items(self) -> list[NewsItem] | None:
+        if not self._client or not self._free_games_enabled():
+            return []
+        try:
+            resp = await self._request_with_network_fallback(
+                "GET",
+                FREE_GAMES_API,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            self._log_warn("free_games", "request failed", error=self._exc_text(exc))
+            return None
+        if not isinstance(payload, list):
+            self._log_warn("free_games", "unexpected payload", payload_type=type(payload).__name__)
+            return None
+
+        active_entries = [
+            entry for entry in payload
+            if isinstance(entry, dict) and self._is_free_game_active(entry)
+        ]
+        if not active_entries:
+            return []
+
+        open_urls: list[str] = []
+        for entry in active_entries:
+            open_url = str(entry.get("open_giveaway_url") or "").strip()
+            if open_url and open_url not in open_urls:
+                open_urls.append(open_url)
+        store_url_map: dict[str, str] = {}
+        if open_urls:
+            results = await asyncio.gather(
+                *[self._resolve_free_game_store_url(url) for url in open_urls],
+                return_exceptions=True,
+            )
+            for open_url, store_url in zip(open_urls, results):
+                if isinstance(store_url, Exception):
+                    continue
+                clean_url = str(store_url or "").strip()
+                if clean_url:
+                    store_url_map[open_url] = clean_url
+
+        enriched_entries: list[dict[str, Any]] = []
+        for entry in active_entries:
+            enriched = dict(entry)
+            open_url = str(enriched.get("open_giveaway_url") or "").strip()
+            if open_url and open_url in store_url_map:
+                enriched["_store_url"] = store_url_map[open_url]
+            enriched_entries.append(enriched)
+
+        appids: list[str] = []
+        for entry in enriched_entries:
+            appid = self._extract_free_game_appid(entry)
+            if appid and appid not in appids:
+                appids.append(appid)
+        official_names: dict[str, str] = {}
+        if appids:
+            results = await asyncio.gather(
+                *[self._get_free_game_official_name(appid) for appid in appids],
+                return_exceptions=True,
+            )
+            for appid, name in zip(appids, results):
+                if isinstance(name, Exception):
+                    continue
+                clean_name = str(name or "").strip()
+                if clean_name:
+                    official_names[appid] = clean_name
+
+        items = [
+            self._free_game_entry_to_news(
+                entry,
+                official_name=official_names.get(self._extract_free_game_appid(entry), ""),
+                appid=self._extract_free_game_appid(entry),
+            )
+            for entry in enriched_entries
+        ]
+        items = self._normalize_news_items(items)
+        items.sort(key=lambda item: (item.date, item.title), reverse=True)
         return items
 
     async def _fetch_workshop_details(self, item_ids: list[str]) -> list[dict[str, Any]]:
@@ -1786,8 +2408,8 @@ class SteamUpdatePush(Star):
                     return str(value[key]).strip()
         return ""
 
-    async def _get_app_name(self, appid: str) -> str:
-        lang = str(self._cfg("steam_lang", "schinese")).strip().lower() or "schinese"
+    async def _get_app_name_by_lang(self, appid: str, lang: str) -> str:
+        lang = str(lang or "schinese").strip().lower() or "schinese"
         appid_map = self._load_appid_name_map()
         mapped = self._pick_name_from_map(appid_map.get(str(appid)), lang)
         if mapped:
@@ -1833,6 +2455,18 @@ class SteamUpdatePush(Star):
             self._debug(f"fetch app name failed ({appid}): {exc}")
 
         return f"AppID {appid}"
+
+    async def _get_app_name(self, appid: str) -> str:
+        lang = str(self._cfg("steam_lang", "schinese")).strip().lower() or "schinese"
+        return await self._get_app_name_by_lang(appid, lang)
+
+    async def _get_free_game_official_name(self, appid: str) -> str:
+        if not str(appid or "").strip().isdigit():
+            return ""
+        name = await self._get_app_name_by_lang(str(appid).strip(), "schinese")
+        if name.startswith("AppID "):
+            return ""
+        return name
 
     async def _resolve_app_names(self, appids: list[str]) -> dict[str, str]:
         if not appids:
@@ -2056,6 +2690,7 @@ class SteamUpdatePush(Star):
         lines.append("")
         max_chars = int(self._cfg("content_max_chars", 800))
         for sec in sections:
+            is_free_games_sec = str(sec.appid).strip().lower() == "free_games"
             lines.append(f"【{sec.title}】")
             if not sec.updates:
                 lines.append("暂无更新")
@@ -2063,14 +2698,18 @@ class SteamUpdatePush(Star):
                 continue
             for item in sec.updates:
                 lines.append(f"- {item.title}")
-                summary = self._summarize_text(item.contents, max_chars)
+                if is_free_games_sec:
+                    summary = self._summarize_free_game_text(item.contents, max_chars)
+                else:
+                    summary = self._summarize_text(item.contents, max_chars)
                 if summary:
                     lines.append(summary)
-                date_text = self._format_time(item.date)
-                if date_text:
-                    lines.append(f"发布于：{date_text}")
-                if item.url:
-                    lines.append(f"链接：{item.url}")
+                if not is_free_games_sec:
+                    date_text = self._format_time(item.date)
+                    if date_text:
+                        lines.append(f"发布于：{date_text}")
+                    if item.url:
+                        lines.append(f"链接：{item.url}")
                 lines.append("")
         return "\n".join(lines).strip()
 
@@ -2368,6 +3007,7 @@ class SteamUpdatePush(Star):
         blocks: list[RenderBlock] = []
         title_color = (199, 213, 224)
         is_workshop_sec = str(sec.appid).strip().lower().startswith("workshop")
+        is_free_games_sec = str(sec.appid).strip().lower() == "free_games"
         if not is_workshop_sec:
             game_name = str(sec.title or "").strip().strip("[]").strip("\u3010\u3011")
             blocks.append(RenderBlock("text", game_name, section_title_font, accent, 14))
@@ -2400,12 +3040,15 @@ class SteamUpdatePush(Star):
                     if title_blocks:
                         title_blocks[-1].gap = 8
                         blocks.extend(title_blocks)
-            summary = self._summarize_text(item.contents, max_chars)
+            if is_free_games_sec:
+                summary = self._summarize_free_game_text(item.contents, max_chars)
+            else:
+                summary = self._summarize_text(item.contents, max_chars)
             if summary:
                 blocks.extend(self._wrap_blocks(summary, body_font, body_color, max_text_width))
 
             image_urls: list[str] = []
-            if is_workshop_sec:
+            if is_workshop_sec or is_free_games_sec:
                 u = str(getattr(item, "image_url", "") or "").strip()
                 if u and max_imgs > 0:
                     image_urls = [u]
@@ -2417,12 +3060,13 @@ class SteamUpdatePush(Star):
                     if img:
                         img = self._scale_image(img, image_max_width, max_img_h)
                         blocks.append(RenderBlock("image", image=img, gap=10))
-            date_text = self._format_time(item.date)
-            if date_text:
-                blocks.append(RenderBlock("text", "", small_font, muted, 4))
-                blocks.append(RenderBlock("text", f"发布于：{date_text}", small_font, muted, 10))
-            if item.url:
-                blocks.append(RenderBlock("text", f"{item.url}", small_font, muted, 14))
+            if not is_free_games_sec:
+                date_text = self._format_time(item.date)
+                if date_text:
+                    blocks.append(RenderBlock("text", "", small_font, muted, 4))
+                    blocks.append(RenderBlock("text", f"发布于：{date_text}", small_font, muted, 10))
+                if item.url:
+                    blocks.append(RenderBlock("text", f"{item.url}", small_font, muted, 14))
             if is_workshop_sec:
                 for url in image_urls:
                     img = image_map.get(url)
@@ -2509,6 +3153,39 @@ class SteamUpdatePush(Star):
         if len(clean) > max_chars:
             clean = clean[: max_chars - 3].rstrip() + "..."
         return clean
+
+    def _summarize_free_game_text(self, text: str, max_chars: int) -> str:
+        clean = self._format_news_text(text)
+        if not clean:
+            return ""
+
+        lines = [line.strip() for line in clean.splitlines() if line.strip()]
+        keepers: list[str] = []
+        for prefix in ("截止时间:", "原价:"):
+            matched = next((line for line in lines if line.startswith(prefix)), "")
+            if matched:
+                keepers.append(matched)
+
+        if not keepers:
+            banned_parts = (
+                "领取方式",
+                "活动链接",
+                "http://",
+                "https://",
+                "Click the button to visit the giveaway page",
+                "Download this game directly via Steam",
+                "That's it! Have fun!",
+            )
+            fallback_lines = [
+                line for line in lines
+                if not any(part in line for part in banned_parts)
+            ]
+            keepers = fallback_lines[:2]
+
+        summary = "\n".join(keepers).strip()
+        if len(summary) > max_chars:
+            summary = summary[: max_chars - 3].rstrip() + "..."
+        return summary
 
 
     def _format_news_text(self, text: str) -> str:
@@ -2667,9 +3344,10 @@ class SteamUpdatePush(Star):
         max_imgs = int(self._cfg("image_max_per_item", 1))
         for sec in sections:
             is_workshop_sec = str(sec.appid).strip().lower().startswith("workshop")
+            is_free_games_sec = str(sec.appid).strip().lower() == "free_games"
             for item in sec.updates:
                 candidates: list[str] = []
-                if is_workshop_sec:
+                if is_workshop_sec or is_free_games_sec:
                     u = str(getattr(item, "image_url", "") or "").strip()
                     if u and max_imgs > 0:
                         candidates.append(u)
@@ -2775,6 +3453,11 @@ class SteamUpdatePush(Star):
         if not ts:
             return ""
         return datetime.fromtimestamp(ts).strftime("%Y/%m/%d %H:%M")
+
+    def _format_free_game_time(self, ts: int) -> str:
+        if not ts:
+            return ""
+        return datetime.fromtimestamp(ts, self._get_display_timezone()).strftime("%Y/%m/%d %H:%M")
 
     # --- font ---
     def _load_font(self, size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -3107,3 +3790,6 @@ class SteamUpdatePush(Star):
         )
         yield event.plain_result("Steam 更新推送已就绪")
 
+
+class Main(SteamUpdatePush):
+    pass

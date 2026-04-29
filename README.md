@@ -32,7 +32,10 @@
 - **LLM整理**：可选用大模型对更新内容进行翻译/总结/排版
 - **卡片/文本**：两种输出模式可选
 - **无更新静默**：当天无更新不推送
+- **限时免费领取活动**：支持将当前仍可领取的 Steam 游戏作为独立分区“限时免费领取”并入游戏更新推送
 - **创意工坊订阅监控**：支持轮询 Workshop PublishedFileID，发现更新时间变化后推送，支持查询非公开创意工坊内容
+
+<img width="600" alt="free_games_preview" src="docs/images/free_games_preview.png" />
 
 <img width="900" height="1184" alt="preview" src="https://github.com/user-attachments/assets/59a296a5-23f8-428f-9a32-72e38f64289c" />
 
@@ -66,6 +69,9 @@ AstrBot WebUI -> 插件 -> 插件配置
 | steam_web_api_key | Steam Web API Key（可选） |
 | enable_feed_fallback | 是否启用 Steam Feed 回退 |
 | feed_timeout_sec | Feed 回退超时秒数 |
+| free_games_enable | 是否启用限时免费领取活动 |
+| free_games_manual_only_when_no_news | 手动查询在没有普通游戏更新时，是否仅返回“限时免费领取”分区 |
+| display_timezone | 免费领取截止时间显示时区；留空跟随容器系统时区，填写 IANA 时区名时按 UTC 活动源时间转换显示 |
 | proxy_mode | 代理模式：`off` / `system` / `custom` |
 | proxy_url | 自定义代理地址（仅 `custom` 生效） |
 | steam_appids | AppID 列表（如 `730`） |
@@ -176,6 +182,13 @@ mixin:
 ### 📣 自动推送
 开启 `enable_push` 即启用插件，插件会自动轮询 Steam 更新日志并推送到配置的群
 若同时开启 `workshop_enable` 并配置 `workshop_item_ids`，会在同一轮询中检测创意工坊条目更新时间并合并推送
+若开启 `free_games_enable`，新的免费领取活动会在首次发现时主动推送一次；活动仍在领取期内时，只要同一轮存在普通游戏更新推送，就会作为独立分区“限时免费领取”附在游戏更新后面
+免费领取活动正文现在仅保留“截止时间”和“原价”
+免费领取活动在文本模式和卡片模式下均不会额外显示发布时间与链接
+即使某一轮免费领取活动正文仍混入旧版“领取方式”或“活动链接”，渲染阶段也会自动裁剪，只保留“截止时间”和“原价”
+`display_timezone` 留空时跟随容器系统时区；填写 IANA 时区名时，活动源时间会先按 UTC 解释，再转换为目标时区显示截止时间
+免费领取活动数据来自 GamerPower 公开接口：`https://www.gamerpower.com/api/giveaways?platform=steam&type=game`
+该功能已经经过线上轮询与手动查询验证，可通过 `free_games_enable` 独立开启或关闭
 
 ### 💬 手动查询
 群内发送任一配置指令即可触发，例如：
@@ -184,6 +197,10 @@ STEAM更新
 steam更新
 cs2更新
 ```
+当没有普通游戏更新但存在仍可领取的免费游戏时，`free_games_manual_only_when_no_news` 默认为开启，此时仅返回“限时免费领取”分区
+如果将 `free_games_manual_only_when_no_news` 设为关闭，当天没有普通游戏更新时，命令会回退展示较早的游戏更新，并在该回退结果后附上“限时免费领取”分区
+如果未配置游戏 AppID 但仍启用 `free_games_enable`，手动查询会继续返回当前有效的“限时免费领取”分区
+免费领取活动标题优先显示接口原始名称；如果可解析到 Steam 官方中文名，则显示为 `原始标题（官方中文名）`
 
 ### 🛰️ 平台捕获
 ```
