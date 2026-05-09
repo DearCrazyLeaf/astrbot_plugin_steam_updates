@@ -388,6 +388,51 @@ class FreeGamesLogicTest(unittest.TestCase):
         self.assertNotIn("领取方式:", item.contents)
         self.assertNotIn("活动链接:", item.contents)
 
+    def test_fetch_free_game_items_treats_no_active_payload_as_empty(self):
+        plugin = self._make_plugin()
+        plugin._cfg = lambda key, default=None: {"free_games_enable": True}.get(key, default)
+        plugin._client = object()
+        warnings = []
+        plugin._log_warn = lambda *args, **kwargs: warnings.append((args, kwargs))
+
+        class _Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "status": 0,
+                    "status_message": "No active giveaways available at the moment, please try again later.",
+                }
+
+        plugin._request_with_network_fallback = self._async_return(_Response())
+
+        items = asyncio.run(plugin._fetch_free_game_items())
+
+        self.assertEqual(items, [])
+        self.assertEqual(warnings, [])
+
+    def test_fetch_free_game_items_warns_on_unknown_dict_payload(self):
+        plugin = self._make_plugin()
+        plugin._cfg = lambda key, default=None: {"free_games_enable": True}.get(key, default)
+        plugin._client = object()
+        warnings = []
+        plugin._log_warn = lambda *args, **kwargs: warnings.append((args, kwargs))
+
+        class _Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"status": 0, "status_message": "Unexpected API response"}
+
+        plugin._request_with_network_fallback = self._async_return(_Response())
+
+        items = asyncio.run(plugin._fetch_free_game_items())
+
+        self.assertIsNone(items)
+        self.assertTrue(warnings)
+
     def test_build_text_message_omits_publish_time_and_link_for_free_games(self):
         plugin = self._make_plugin()
         sections = [

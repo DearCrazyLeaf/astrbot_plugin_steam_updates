@@ -1840,6 +1840,11 @@ class SteamUpdatePush(Star):
         except Exception as exc:
             self._log_warn("free_games", "request failed", error=self._exc_text(exc))
             return None
+        if isinstance(payload, dict):
+            if self._is_no_active_free_games_payload(payload):
+                return []
+            payload = self._extract_free_games_payload_list(payload)
+
         if not isinstance(payload, list):
             self._log_warn("free_games", "unexpected payload", payload_type=type(payload).__name__)
             return None
@@ -1906,6 +1911,20 @@ class SteamUpdatePush(Star):
         items = self._normalize_news_items(items)
         items.sort(key=lambda item: (item.date, item.title), reverse=True)
         return items
+
+    @staticmethod
+    def _is_no_active_free_games_payload(payload: dict[str, Any]) -> bool:
+        status = str(payload.get("status", "")).strip()
+        status_message = str(payload.get("status_message", "")).strip().lower()
+        return status == "0" and "no active giveaways" in status_message
+
+    @staticmethod
+    def _extract_free_games_payload_list(payload: dict[str, Any]) -> Any:
+        for key in ("giveaways", "data", "items", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        return payload
 
     async def _fetch_workshop_details(self, item_ids: list[str]) -> list[dict[str, Any]]:
         if not self._client:
