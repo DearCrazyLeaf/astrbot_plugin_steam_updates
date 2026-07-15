@@ -9,6 +9,27 @@ from test_free_games import _load_module
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class SendContext:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = []
+
+    async def send_message(self, session, message_chain):
+        self.calls.append((session, message_chain))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class BotRecorder:
+    def __init__(self):
+        self.calls = []
+
+    async def send_group_msg(self, group_id, message):
+        self.calls.append((group_id, message))
+
+
 class NotifyTargetsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -42,6 +63,125 @@ class NotifyTargetsTest(unittest.TestCase):
             platform_id=platform_id,
             legacy_group_id=legacy_group_id,
         )
+
+    def _chain(self, text="payload"):
+        return self.mod.MessageChain(
+            chain=[self.mod.Plain(text)]
+        )
+
+    def test_push_chain_tracks_true_false_and_exception(self):
+        targets = [
+            self._target("qq-a:GroupMessage:100"),
+            self._target("qq-b:FriendMessage:200"),
+            self._target("telegram:OtherMessage:room:7"),
+        ]
+        context = SendContext(
+            [
+                True,
+                False,
+                RuntimeError(
+                    "failed telegram:OtherMessage:room:7"
+                ),
+            ]
+        )
+        plugin = self._make_plugin()
+        plugin.context = context
+
+        result = asyncio.run(
+            plugin._push_chain(targets, self._chain())
+        )
+
+        self.assertEqual(result.succeeded, [targets[0]])
+        self.assertEqual(result.failed, targets[1:])
+        self.assertEqual(
+            [session for session, _ in context.calls],
+            [target.umo for target in targets],
+        )
+        rendered_logs = json.dumps(
+            plugin._warnings,
+            ensure_ascii=False,
+            default=str,
+        )
+        self.assertNotIn(targets[2].umo, rendered_logs)
+        self.assertIn("RuntimeError", rendered_logs)
+
+    def test_bot_fallback_accepts_matching_numeric_legacy_group(self):
+        target = self._target(
+            "qq-a:GroupMessage:100",
+            legacy_group_id="100",
+        )
+        plugin = self._make_plugin()
+        plugin.context = SendContext([False])
+        plugin._last_platform_id = "qq-a"
+        plugin._last_bot = BotRecorder()
+
+        sent = asyncio.run(
+            plugin._send_to_target(
+                target,
+                self._chain(),
+                target_index=1,
+            )
+        )
+
+        self.assertTrue(sent)
+        self.assertEqual(len(plugin._last_bot.calls), 1)
+        group_id, message = plugin._last_bot.calls[0]
+        self.assertEqual(group_id, 100)
+        self.assertEqual(message[0].text, "payload")
+
+    def test_bot_fallback_rejects_full_mismatch_and_non_numeric(self):
+        cases = [
+            (
+                self._target("qq-a:GroupMessage:100"),
+                "qq-a",
+            ),
+            (
+                self._target(
+                    "qq-b:GroupMessage:100",
+                    legacy_group_id="100",
+                ),
+                "qq-a",
+            ),
+            (
+                self._target(
+                    "qq-a:GroupMessage:not-number",
+                    legacy_group_id="not-number",
+                ),
+                "qq-a",
+            ),
+        ]
+        for target, captured_platform in cases:
+            with self.subTest(target=target):
+                plugin = self._make_plugin()
+                plugin.context = SendContext([False])
+                plugin._last_platform_id = captured_platform
+                plugin._last_bot = BotRecorder()
+
+                sent = asyncio.run(
+                    plugin._send_to_target(
+                        target,
+                        self._chain(),
+                        target_index=1,
+                    )
+                )
+
+                self.assertFalse(sent)
+                self.assertEqual(plugin._last_bot.calls, [])
+
+    def test_push_image_marks_every_target_failed_when_file_save_fails(self):
+        targets = [
+            self._target("qq-a:GroupMessage:100"),
+            self._target("qq-b:FriendMessage:200"),
+        ]
+        plugin = self._make_plugin()
+        plugin._save_temp_image = lambda image_bytes: None
+
+        result = asyncio.run(
+            plugin._push_image(targets, b"image")
+        )
+
+        self.assertEqual(result.succeeded, [])
+        self.assertEqual(result.failed, targets)
 
     def test_resolve_accepts_all_message_types_and_multiple_instances(self):
         plugin = self._make_plugin(

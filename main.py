@@ -3728,69 +3728,129 @@ class SteamUpdatePush(Star):
         return ImageFont.load_default()
 
     # --- send ---
-    async def _push_text(self, group_ids: list[str], text: str) -> bool:
+    async def _push_text(
+        self,
+        targets: list[NotifyTarget],
+        text: str,
+    ) -> PushResult:
         chain = MessageChain(chain=[Plain(text)])
-        return await self._push_chain(group_ids, chain)
+        return await self._push_chain(targets, chain)
 
-    async def _push_image(self, group_ids: list[str], image_bytes: bytes) -> bool:
+    async def _push_image(
+        self,
+        targets: list[NotifyTarget],
+        image_bytes: bytes,
+    ) -> PushResult:
         path = self._save_temp_image(image_bytes)
         if not path:
             self._log_warn("push", "save temp image failed")
-            return False
+            return PushResult([], list(targets))
         try:
             chain = MessageChain(chain=[Image(file=path)])
         except Exception as exc:
-            self._log_warn("push", "build image chain failed", path=path, error=exc)
+            self._log_warn(
+                "push",
+                "build image chain failed",
+                path=path,
+                error_type=type(exc).__name__,
+            )
+            return PushResult([], list(targets))
+        return await self._push_chain(targets, chain)
+
+    async def _push_chain(
+        self,
+        targets: list[NotifyTarget],
+        chain: MessageChain,
+    ) -> PushResult:
+        self._log_debug(
+            "push",
+            "start",
+            target_count=len(targets),
+            chain_size=len(chain.chain),
+        )
+        succeeded: list[NotifyTarget] = []
+        failed: list[NotifyTarget] = []
+        for index, target in enumerate(targets, start=1):
+            sent = await self._send_to_target(
+                target,
+                chain,
+                target_index=index,
+            )
+            fields = self._target_log_fields(
+                target.umo,
+                index,
+                legacy=bool(target.legacy_group_id),
+            )
+            if sent:
+                succeeded.append(target)
+                self._log_debug("push", "target sent", **fields)
+            else:
+                failed.append(target)
+                self._log_warn("push", "target failed", **fields)
+        return PushResult(succeeded, failed)
+
+    async def _send_to_target(
+        self,
+        target: NotifyTarget,
+        chain: MessageChain,
+        target_index: int,
+    ) -> bool:
+        fields = self._target_log_fields(
+            target.umo,
+            target_index,
+            legacy=bool(target.legacy_group_id),
+        )
+        try:
+            sent = await self.context.send_message(
+                session=target.umo,
+                message_chain=chain,
+            )
+            if sent is True:
+                self._log_debug("send", "via session", **fields)
+                return True
+            self._log_warn(
+                "send",
+                "session returned false",
+                **fields,
+            )
+        except Exception as exc:
+            self._log_warn(
+                "send",
+                "session failed",
+                error_type=type(exc).__name__,
+                **fields,
+            )
+
+        if not target.legacy_group_id:
             return False
-        return await self._push_chain(group_ids, chain)
-
-    async def _push_chain(self, group_ids: list[str], chain: MessageChain) -> bool:
-        self._log_debug("push", "start", group_count=len(group_ids), chain_size=len(chain.chain))
-        any_success = False
-        for gid in group_ids:
-            sent = await self._send_to_group(gid, chain)
-            if not sent:
-                self._log_warn("push", "group failed", group_id=gid)
-            else:
-                self._log_debug("push", "group sent", group_id=gid)
-                any_success = True
-        return any_success
-
-    async def _send_to_group(self, group_id: str, chain: MessageChain) -> bool:
-        session = self._build_session_id(group_id)
-        if session:
-            try:
-                await self.context.send_message(session=session, message_chain=chain)
-                self._log_debug("send", "via session", group_id=group_id, session=session)
-                return True
-            except Exception as exc:
-                self._log_warn("send", "session failed", group_id=group_id, session=session, error=exc)
-
-        # fallback: aiocqhttp bot
-        if self._last_bot and hasattr(self._last_bot, "send_group_msg"):
-            try:
-                await self._last_bot.send_group_msg(
-                    group_id=int(group_id), message=chain.chain
-                )
-                self._log_debug("send", "via bot", group_id=group_id)
-                return True
-            except Exception as exc:
-                self._log_warn("send", "bot fallback failed", group_id=group_id, error=exc)
-        else:
-            self._log_warn("send", "no available sender", group_id=group_id)
-        return False
-
-    def _build_session_id(self, group_id: str) -> str | None:
-        if ":" in group_id:
-            return group_id
-        platform_id = str(self._cfg("platform_id", "")).strip()
-        if not platform_id:
-            if self._last_platform_id:
-                platform_id = self._last_platform_id
-            else:
-                self._log_warn("send", "platform id unresolved", group_id=group_id)
-                return None
-        return f"{platform_id}:GroupMessage:{group_id}"
+        if target.platform_id != str(
+            self._last_platform_id or ""
+        ).strip():
+            return False
+        if not self._last_bot or not hasattr(
+            self._last_bot,
+            "send_group_msg",
+        ):
+            return False
+        try:
+            group_id = int(target.legacy_group_id)
+        except (TypeError, ValueError):
+            return False
+        try:
+            await self._last_bot.send_group_msg(
+                group_id=group_id,
+                message=chain.chain,
+            )
+            self._log_debug("send", "via bot", **fields)
+            return True
+        except Exception as exc:
+            self._log_warn(
+                "send",
+                "bot fallback failed",
+                error_type=type(exc).__name__,
+                **fields,
+            )
+            return False
 
     def _save_temp_image(self, image_bytes: bytes) -> str | None:
         if not image_bytes:
