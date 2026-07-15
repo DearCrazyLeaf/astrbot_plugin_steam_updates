@@ -32,6 +32,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.message.components import Image, Plain
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
@@ -81,6 +82,19 @@ class RenderBlock:
     image: PilImage.Image | None = None
 
 
+@dataclass(frozen=True)
+class NotifyTarget:
+    umo: str
+    platform_id: str
+    legacy_group_id: str = ""
+
+
+@dataclass
+class PushResult:
+    succeeded: list[NotifyTarget]
+    failed: list[NotifyTarget]
+
+
 class SteamUpdatePush(Star):
     _CFG_GROUP_KEYS = (
         "basic_settings",
@@ -110,7 +124,7 @@ class SteamUpdatePush(Star):
         self._client_signature: str = ""
         self._poll_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
-        self._last_platform_name: str | None = None
+        self._last_platform_id: str | None = None
         self._last_bot: Any | None = None
         self._appid_name_map: dict[str, Any] | None = None
         self._name_cache: dict[str, str] | None = None
@@ -275,6 +289,169 @@ class SteamUpdatePush(Star):
             return default
         except Exception:
             return default
+
+    def _cfg_list_values(self, key: str) -> list[str]:
+        raw = self._cfg(key, []) or []
+        values = raw if isinstance(raw, (list, tuple)) else [raw]
+        return [str(value or "").strip() for value in values]
+
+    @staticmethod
+    def _target_ref(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+    def _target_log_fields(
+        self,
+        value: str,
+        target_index: int,
+        *,
+        legacy: bool,
+        message_type: str = "",
+    ) -> dict[str, Any]:
+        parts = value.split(":", 2)
+        detected_type = parts[1] if len(parts) == 3 else ""
+        return {
+            "target_index": target_index,
+            "target_ref": self._target_ref(value),
+            "message_type": message_type or detected_type,
+            "legacy": legacy,
+        }
+
+    def _parse_notify_target(
+        self,
+        value: str,
+        *,
+        config_field: str,
+        target_index: int,
+        legacy_group_id: str = "",
+    ) -> NotifyTarget | None:
+        legacy = bool(legacy_group_id)
+        if not value:
+            self._log_warn(
+                "notify_target",
+                "invalid umo",
+                config_field=config_field,
+                **self._target_log_fields(
+                    value,
+                    target_index,
+                    legacy=legacy,
+                ),
+            )
+            return None
+        try:
+            session = MessageSession.from_str(value)
+        except Exception:
+            self._log_warn(
+                "notify_target",
+                "invalid umo",
+                config_field=config_field,
+                **self._target_log_fields(
+                    value,
+                    target_index,
+                    legacy=legacy,
+                ),
+            )
+            return None
+        normalized = str(session)
+        return NotifyTarget(
+            umo=normalized,
+            platform_id=str(session.platform_id),
+            legacy_group_id=legacy_group_id,
+        )
+
+    def _resolve_notify_targets(self) -> list[NotifyTarget]:
+        targets: list[NotifyTarget] = []
+        seen: set[str] = set()
+
+        def append(target: NotifyTarget | None) -> None:
+            if target is None or target.umo in seen:
+                return
+            seen.add(target.umo)
+            targets.append(target)
+
+        for index, value in enumerate(
+            self._cfg_list_values("notify_umos"),
+            start=1,
+        ):
+            append(
+                self._parse_notify_target(
+                    value,
+                    config_field="notify_umos",
+                    target_index=index,
+                )
+            )
+
+        platform_id = str(self._cfg("platform_id", "") or "").strip()
+        if not platform_id:
+            platform_id = str(self._last_platform_id or "").strip()
+
+        for index, value in enumerate(
+            self._cfg_list_values("notify_group_ids"),
+            start=1,
+        ):
+            if ":" in value:
+                append(
+                    self._parse_notify_target(
+                        value,
+                        config_field="notify_group_ids",
+                        target_index=index,
+                    )
+                )
+                continue
+            if not value:
+                continue
+            if not platform_id:
+                self._log_warn(
+                    "notify_target",
+                    "legacy target missing platform id",
+                    config_field="notify_group_ids",
+                    **self._target_log_fields(
+                        value,
+                        index,
+                        legacy=True,
+                        message_type="GroupMessage",
+                    ),
+                )
+                continue
+            append(
+                self._parse_notify_target(
+                    f"{platform_id}:GroupMessage:{value}",
+                    config_field="notify_group_ids",
+                    target_index=index,
+                    legacy_group_id=value,
+                )
+            )
+        return targets
+
+    def _manual_query_allowed(
+        self,
+        event_umo: str,
+        group_id: str,
+    ) -> bool:
+        legacy_values = self._cfg_list_values("notify_group_ids")
+        if group_id and group_id in {
+            value
+            for value in legacy_values
+            if value and ":" not in value
+        }:
+            return True
+        try:
+            normalized_event = str(MessageSession.from_str(event_umo))
+        except Exception:
+            return False
+
+        configured_full = self._cfg_list_values("notify_umos")
+        configured_full.extend(
+            value for value in legacy_values if ":" in value
+        )
+        for index, value in enumerate(configured_full, start=1):
+            target = self._parse_notify_target(
+                value,
+                config_field="manual_permission",
+                target_index=index,
+            )
+            if target is not None and target.umo == normalized_event:
+                return True
+        return False
 
     def _debug(self, msg: str):
         if self._cfg("debug_log", False):
@@ -3608,8 +3785,8 @@ class SteamUpdatePush(Star):
             return group_id
         platform_id = str(self._cfg("platform_id", "")).strip()
         if not platform_id:
-            if self._last_platform_name:
-                platform_id = self._last_platform_name
+            if self._last_platform_id:
+                platform_id = self._last_platform_id
             else:
                 self._log_warn("send", "platform id unresolved", group_id=group_id)
                 return None
@@ -3730,14 +3907,14 @@ class SteamUpdatePush(Star):
             yield event.plain_result("插件未启用")
             return
 
-        allowed = [str(x).strip() for x in self._cfg("notify_group_ids", []) or []]
-        allowed = [g for g in allowed if g]
-        if not allowed:
-            self._log_warn("manual_cmd", "reject: notify_group_ids empty", group_id=group_id, user_id=user_id)
-            yield event.plain_result("未配置生效群，手动查询已禁用")
-            return
-        if group_id not in allowed:
-            self._log_warn("manual_cmd", "reject: group not allowed", group_id=group_id, user_id=user_id)
+        event_umo = str(event.unified_msg_origin or "").strip()
+        if not self._manual_query_allowed(event_umo, group_id):
+            self._log_warn(
+                "manual_cmd",
+                "reject: group not allowed",
+                group_id=group_id,
+                user_id=user_id,
+            )
             yield event.plain_result("当前群未启用插件")
             return
 
@@ -3778,14 +3955,19 @@ class SteamUpdatePush(Star):
 
     @filter.command("steam_update_ping")
     async def steam_update_ping(self, event: AstrMessageEvent):
-        """捕获平台信息用于推送（可隐藏）"""
-        self._last_platform_name = event.get_platform_name()
-        if isinstance(event, AiocqhttpMessageEvent):
-            self._last_bot = event.bot
+        """捕获平台实例信息用于旧群号推送兼容。"""
+        self._last_platform_id = str(
+            event.get_platform_id() or ""
+        ).strip()
+        self._last_bot = (
+            event.bot
+            if isinstance(event, AiocqhttpMessageEvent)
+            else None
+        )
         self._log_debug(
             "ping",
             "captured sender context",
-            platform=self._last_platform_name,
+            platform_ref=self._target_ref(self._last_platform_id),
             has_bot=bool(self._last_bot),
         )
         yield event.plain_result("Steam 更新推送已就绪")
