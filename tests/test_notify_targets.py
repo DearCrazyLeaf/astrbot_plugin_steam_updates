@@ -116,6 +116,27 @@ class NotifyTargetsTest(unittest.TestCase):
             [target.umo for target in targets],
             ["qq-a:GroupMessage:valid"],
         )
+        target_warnings = [
+            kwargs
+            for args, kwargs in plugin._warnings
+            if args and args[0] == "notify_target"
+        ]
+        self.assertEqual(len(target_warnings), 4)
+        self.assertEqual(
+            [fields["target_index"] for fields in target_warnings],
+            [1, 2, 3, 1],
+        )
+        for fields in target_warnings:
+            self.assertRegex(fields["target_ref"], r"^[0-9a-f]{12}$")
+            self.assertEqual(
+                set(fields),
+                {
+                    "target_index",
+                    "target_ref",
+                    "message_type",
+                    "legacy",
+                },
+            )
         rendered_logs = json.dumps(
             plugin._warnings,
             ensure_ascii=False,

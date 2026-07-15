@@ -316,41 +316,46 @@ class SteamUpdatePush(Star):
             "legacy": legacy,
         }
 
+    def _invalid_notify_target(
+        self,
+        value: str,
+        target_index: int,
+        *,
+        legacy: bool,
+    ) -> None:
+        self._log_warn(
+            "notify_target",
+            "invalid umo",
+            **self._target_log_fields(
+                value,
+                target_index,
+                legacy=legacy,
+            ),
+        )
+        return None
+
     def _parse_notify_target(
         self,
         value: str,
         *,
-        config_field: str,
         target_index: int,
         legacy_group_id: str = "",
     ) -> NotifyTarget | None:
         legacy = bool(legacy_group_id)
         if not value:
-            self._log_warn(
-                "notify_target",
-                "invalid umo",
-                config_field=config_field,
-                **self._target_log_fields(
-                    value,
-                    target_index,
-                    legacy=legacy,
-                ),
+            return self._invalid_notify_target(
+                value,
+                target_index,
+                legacy=legacy,
             )
-            return None
         try:
             session = MessageSession.from_str(value)
         except Exception:
-            self._log_warn(
-                "notify_target",
-                "invalid umo",
-                config_field=config_field,
-                **self._target_log_fields(
-                    value,
-                    target_index,
-                    legacy=legacy,
-                ),
+            return self._invalid_notify_target(
+                value,
+                target_index,
+                legacy=legacy,
             )
-            return None
         normalized = str(session)
         return NotifyTarget(
             umo=normalized,
@@ -375,7 +380,6 @@ class SteamUpdatePush(Star):
             append(
                 self._parse_notify_target(
                     value,
-                    config_field="notify_umos",
                     target_index=index,
                 )
             )
@@ -392,7 +396,6 @@ class SteamUpdatePush(Star):
                 append(
                     self._parse_notify_target(
                         value,
-                        config_field="notify_group_ids",
                         target_index=index,
                     )
                 )
@@ -403,7 +406,6 @@ class SteamUpdatePush(Star):
                 self._log_warn(
                     "notify_target",
                     "legacy target missing platform id",
-                    config_field="notify_group_ids",
                     **self._target_log_fields(
                         value,
                         index,
@@ -415,7 +417,6 @@ class SteamUpdatePush(Star):
             append(
                 self._parse_notify_target(
                     f"{platform_id}:GroupMessage:{value}",
-                    config_field="notify_group_ids",
                     target_index=index,
                     legacy_group_id=value,
                 )
@@ -446,7 +447,6 @@ class SteamUpdatePush(Star):
         for index, value in enumerate(configured_full, start=1):
             target = self._parse_notify_target(
                 value,
-                config_field="manual_permission",
                 target_index=index,
             )
             if target is not None and target.umo == normalized_event:
