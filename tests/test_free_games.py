@@ -8,12 +8,13 @@ import time
 import types
 import unittest
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import TZPATH
 
 
-PLUGIN_PATH = Path("/mnt/s/Projects/astrbot_plugin_steam_updates/main.py")
+PLUGIN_PATH = Path(__file__).resolve().parents[1] / "main.py"
 MODULE_NAME = "steam_updates_main_under_test"
 
 
@@ -76,6 +77,34 @@ def _install_stub_modules() -> None:
         def __init__(self, chain=None):
             self.chain = chain or []
 
+    class _MessageType(Enum):
+        GROUP_MESSAGE = "GroupMessage"
+        FRIEND_MESSAGE = "FriendMessage"
+        OTHER_MESSAGE = "OtherMessage"
+
+    class _MessageSession:
+        def __init__(self, platform_name, message_type, session_id):
+            self.platform_name = platform_name
+            self.platform_id = platform_name
+            self.message_type = message_type
+            self.session_id = session_id
+
+        def __str__(self):
+            return (
+                f"{self.platform_id}:"
+                f"{self.message_type.value}:"
+                f"{self.session_id}"
+            )
+
+        @staticmethod
+        def from_str(session_str):
+            platform_id, message_type, session_id = session_str.split(":", 2)
+            return _MessageSession(
+                platform_id,
+                _MessageType(message_type),
+                session_id,
+            )
+
     class _AstrMessageEvent:
         pass
 
@@ -105,6 +134,11 @@ def _install_stub_modules() -> None:
         "astrbot.core.message.message_event_result"
     )
     astrbot_message_result_mod.MessageChain = _MessageChain
+
+    astrbot_message_session_mod = types.ModuleType(
+        "astrbot.core.platform.message_session"
+    )
+    astrbot_message_session_mod.MessageSession = _MessageSession
 
     astrbot_event_mod = types.ModuleType("astrbot.core.platform.astr_message_event")
     astrbot_event_mod.AstrMessageEvent = _AstrMessageEvent
@@ -139,6 +173,9 @@ def _install_stub_modules() -> None:
     sys.modules["astrbot.core.config.astrbot_config"] = astrbot_core_config_mod
     sys.modules["astrbot.core.message.components"] = astrbot_message_components_mod
     sys.modules["astrbot.core.message.message_event_result"] = astrbot_message_result_mod
+    sys.modules[
+        "astrbot.core.platform.message_session"
+    ] = astrbot_message_session_mod
     sys.modules["astrbot.core.platform.astr_message_event"] = astrbot_event_mod
     sys.modules[
         "astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event"
