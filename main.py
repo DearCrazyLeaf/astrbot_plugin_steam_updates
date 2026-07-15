@@ -3751,7 +3751,6 @@ class SteamUpdatePush(Star):
             self._log_warn(
                 "push",
                 "build image chain failed",
-                path=path,
                 error_type=type(exc).__name__,
             )
             return PushResult([], list(targets))
@@ -3832,8 +3831,14 @@ class SteamUpdatePush(Star):
             "send_group_msg",
         ):
             return False
+        legacy_group_id = target.legacy_group_id
+        if not (
+            legacy_group_id.isascii()
+            and legacy_group_id.isdigit()
+        ):
+            return False
         try:
-            group_id = int(target.legacy_group_id)
+            group_id = int(legacy_group_id)
         except (TypeError, ValueError):
             return False
         try:
@@ -3864,7 +3869,11 @@ class SteamUpdatePush(Star):
             self._trim_temp_dir(temp_dir, keep=10)
             return str(path)
         except Exception as exc:
-            self._debug(f"save temp image failed: {exc}")
+            self._log_warn(
+                "push",
+                "save temp image failed",
+                error_type=type(exc).__name__,
+            )
             return None
 
     def _trim_temp_dir(self, temp_dir: Path, keep: int = 10) -> None:

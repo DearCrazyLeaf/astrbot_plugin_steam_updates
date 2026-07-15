@@ -1,7 +1,9 @@
 import asyncio
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test_free_games import _load_module
 
@@ -73,11 +75,13 @@ class NotifyTargetsTest(unittest.TestCase):
         targets = [
             self._target("qq-a:GroupMessage:100"),
             self._target("qq-b:FriendMessage:200"),
+            self._target("qq-c:FriendMessage:300"),
             self._target("telegram:OtherMessage:room:7"),
         ]
         context = SendContext(
             [
                 True,
+                1,
                 False,
                 RuntimeError(
                     "failed telegram:OtherMessage:room:7"
@@ -102,7 +106,7 @@ class NotifyTargetsTest(unittest.TestCase):
             ensure_ascii=False,
             default=str,
         )
-        self.assertNotIn(targets[2].umo, rendered_logs)
+        self.assertNotIn(targets[3].umo, rendered_logs)
         self.assertIn("RuntimeError", rendered_logs)
 
     def test_bot_fallback_accepts_matching_numeric_legacy_group(self):
@@ -150,6 +154,24 @@ class NotifyTargetsTest(unittest.TestCase):
                 "qq-a",
             ),
         ]
+        invalid_legacy_ids = [
+            "+100",
+            "-100",
+            " 100",
+            "100 ",
+            "1_00",
+            "１００",
+        ]
+        cases.extend(
+            (
+                self._target(
+                    f"qq-a:GroupMessage:{legacy_group_id}",
+                    legacy_group_id=legacy_group_id,
+                ),
+                "qq-a",
+            )
+            for legacy_group_id in invalid_legacy_ids
+        )
         for target, captured_platform in cases:
             with self.subTest(target=target):
                 plugin = self._make_plugin()
@@ -182,6 +204,93 @@ class NotifyTargetsTest(unittest.TestCase):
 
         self.assertEqual(result.succeeded, [])
         self.assertEqual(result.failed, targets)
+
+    def test_save_temp_image_logs_only_exception_type(self):
+        plugin = self._make_plugin()
+        plugin._debug = (
+            lambda *args, **kwargs:
+            plugin._debug_logs.append((args, kwargs))
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="sensitive-image-save-",
+        ) as temp_dir:
+            data_root = Path(temp_dir) / "private-data-root"
+            data_root.write_text("blocking file", encoding="utf-8")
+            plugin._data_dir = data_root
+
+            saved = plugin._save_temp_image(b"image")
+
+            sensitive_path = str(data_root)
+
+        self.assertIsNone(saved)
+        rendered_logs = json.dumps(
+            [plugin._warnings, plugin._debug_logs],
+            ensure_ascii=False,
+            default=str,
+        )
+        self.assertNotIn("sensitive-image-save-", rendered_logs)
+        self.assertNotIn(sensitive_path, rendered_logs)
+        self.assertIn("NotADirectoryError", rendered_logs)
+        save_warnings = [
+            (args, kwargs)
+            for args, kwargs in plugin._warnings
+            if args == ("push", "save temp image failed")
+        ]
+        self.assertEqual(
+            save_warnings,
+            [
+                (
+                    ("push", "save temp image failed"),
+                    {"error_type": "NotADirectoryError"},
+                )
+            ],
+        )
+
+    def test_push_image_build_failure_logs_only_exception_type(self):
+        targets = [
+            self._target("qq-a:GroupMessage:100"),
+            self._target("qq-b:FriendMessage:200"),
+        ]
+        sensitive_path = "/tmp/sensitive-image-build-path.png"
+        sensitive_error = "sensitive-image-build-error"
+        plugin = self._make_plugin()
+        plugin._save_temp_image = (
+            lambda image_bytes: sensitive_path
+        )
+
+        with patch.object(
+            self.mod,
+            "Image",
+            side_effect=RuntimeError(sensitive_error),
+        ):
+            result = asyncio.run(
+                plugin._push_image(targets, b"image")
+            )
+
+        self.assertEqual(result.succeeded, [])
+        self.assertEqual(result.failed, targets)
+        rendered_logs = json.dumps(
+            plugin._warnings,
+            ensure_ascii=False,
+            default=str,
+        )
+        self.assertNotIn(sensitive_path, rendered_logs)
+        self.assertNotIn(sensitive_error, rendered_logs)
+        self.assertIn("RuntimeError", rendered_logs)
+        build_warnings = [
+            (args, kwargs)
+            for args, kwargs in plugin._warnings
+            if args == ("push", "build image chain failed")
+        ]
+        self.assertEqual(
+            build_warnings,
+            [
+                (
+                    ("push", "build image chain failed"),
+                    {"error_type": "RuntimeError"},
+                )
+            ],
+        )
 
     def test_resolve_accepts_all_message_types_and_multiple_instances(self):
         plugin = self._make_plugin(
