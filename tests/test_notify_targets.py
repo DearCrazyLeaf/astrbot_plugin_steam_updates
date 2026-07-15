@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_free_games import _load_module
+import test_free_games
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +35,7 @@ class BotRecorder:
 class NotifyTargetsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.mod = _load_module()
+        cls.mod = test_free_games._load_module()
 
     def _make_plugin(self, config=None):
         plugin = object.__new__(self.mod.SteamUpdatePush)
@@ -69,6 +69,26 @@ class NotifyTargetsTest(unittest.TestCase):
     def _chain(self, text="payload"):
         return self.mod.MessageChain(
             chain=[self.mod.Plain(text)]
+        )
+
+    def _make_poll_plugin(self):
+        helper = test_free_games.FreeGamesLogicTest()
+        helper.mod = self.mod
+        return helper._make_poll_plugin(
+            updates_by_app={
+                "730": [
+                    self.mod.NewsItem(
+                        "n1",
+                        "Patch",
+                        "u1",
+                        "body",
+                        100,
+                    )
+                ]
+            },
+            free_items=[],
+            previous_free_gids=[],
+            workshop_updates=[],
         )
 
     def test_push_chain_tracks_true_false_and_exception(self):
@@ -432,6 +452,92 @@ class NotifyTargetsTest(unittest.TestCase):
                 "400",
             )
         )
+
+    def test_poll_all_invalid_targets_stops_before_http_and_state(self):
+        plugin = self._make_plugin(
+            {
+                "enable_push": True,
+                "notify_umos": ["invalid"],
+                "notify_group_ids": [],
+                "steam_appids": ["730"],
+            }
+        )
+        plugin._is_current_poll_instance = lambda: True
+        calls = {"http": 0, "state": 0}
+
+        async def ensure_http():
+            calls["http"] += 1
+
+        def load_state():
+            calls["state"] += 1
+            return {}
+
+        plugin._ensure_http_client = ensure_http
+        plugin._load_state = load_state
+        plugin._next_trace_id = lambda prefix: "poll-invalid"
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertEqual(calls, {"http": 0, "state": 0})
+
+    def test_poll_text_fallback_only_uses_image_failed_targets(self):
+        plugin = self._make_poll_plugin()
+        first = self._target("qq-a:GroupMessage:100")
+        second = self._target("qq-b:FriendMessage:200")
+        plugin._resolve_notify_targets = lambda: [first, second]
+        text_calls = []
+
+        async def push_image(targets, image_bytes):
+            return self.mod.PushResult([first], [second])
+
+        async def push_text(targets, text):
+            text_calls.append(list(targets))
+            return self.mod.PushResult(list(targets), [])
+
+        plugin._push_image = push_image
+        plugin._push_text = push_text
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertEqual(text_calls, [[second]])
+        self.assertTrue(hasattr(plugin, "_saved_state"))
+
+    def test_poll_preserves_state_when_every_send_fails(self):
+        plugin = self._make_poll_plugin()
+        target = self._target("qq-a:GroupMessage:100")
+        plugin._resolve_notify_targets = lambda: [target]
+
+        async def fail(targets, payload):
+            return self.mod.PushResult([], list(targets))
+
+        plugin._push_image = fail
+        plugin._push_text = fail
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertFalse(hasattr(plugin, "_saved_state"))
+
+    def test_poll_partial_text_success_saves_global_state(self):
+        plugin = self._make_poll_plugin()
+        first = self._target("qq-a:GroupMessage:100")
+        second = self._target("qq-b:FriendMessage:200")
+        plugin._resolve_notify_targets = lambda: [first, second]
+        previous_cfg = plugin._cfg
+        plugin._cfg = (
+            lambda key, default=None:
+            "text"
+            if key == "message_mode"
+            else previous_cfg(key, default)
+        )
+
+        async def partial(targets, text):
+            return self.mod.PushResult([first], [second])
+
+        plugin._push_text = partial
+
+        asyncio.run(plugin._poll_once())
+
+        self.assertTrue(hasattr(plugin, "_saved_state"))
 
     def test_ping_captures_platform_instance_id_and_aiocq_bot(self):
         plugin = self._make_plugin()

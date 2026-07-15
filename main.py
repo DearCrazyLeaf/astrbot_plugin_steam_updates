@@ -853,20 +853,31 @@ class SteamUpdatePush(Star):
                 logger.exception("[steam_updates][poll] loop execution failed")
 
     async def _poll_once(self):
-        await self._ensure_http_client()
         trace = self._next_trace_id("poll")
         self._log_debug("poll", "start", trace=trace)
         if not self._is_current_poll_instance():
-            self._log_warn("poll", "skip: stale poll instance", trace=trace)
+            self._log_warn(
+                "poll",
+                "skip: stale poll instance",
+                trace=trace,
+            )
             return
         if not bool(self._cfg("enable_push", True)):
-            self._log_debug("poll", "skip: plugin disabled", trace=trace)
+            self._log_debug(
+                "poll",
+                "skip: plugin disabled",
+                trace=trace,
+            )
             return
-        group_ids = [str(x).strip() for x in self._cfg("notify_group_ids", []) or []]
-        group_ids = [g for g in group_ids if g]
-        if not group_ids:
-            self._log_debug("poll", "skip: notify_group_ids empty", trace=trace)
+        targets = self._resolve_notify_targets()
+        if not targets:
+            self._log_debug(
+                "poll",
+                "skip: no valid notification targets",
+                trace=trace,
+            )
             return
+        await self._ensure_http_client()
         appids = self._normalize_appids(self._cfg("steam_appids", []))
         free_games_enabled = self._free_games_enabled()
         workshop_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
@@ -885,7 +896,7 @@ class SteamUpdatePush(Star):
             trace=trace,
             app_count=len(appids),
             workshop_count=len(workshop_ids) if workshop_enabled else 0,
-            group_count=len(group_ids),
+            target_count=len(targets),
             max_days=max_days,
             fetch_count=fetch_count,
         )
@@ -1003,7 +1014,7 @@ class SteamUpdatePush(Star):
             free_game_new_count=len(new_free_game_items),
             free_game_attached_count=len(selected_free_game_items.attached_items),
             free_game_standalone_count=len(selected_free_game_items.standalone_items),
-            groups=len(group_ids),
+            targets=len(targets),
         )
         if not self._is_current_poll_instance():
             self._log_warn("poll", "abort push: stale poll instance", trace=trace)
@@ -1034,6 +1045,7 @@ class SteamUpdatePush(Star):
 
         query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
         mode = str(self._cfg("message_mode", "card")).lower()
+        push_results: list[PushResult] = []
         for card_kind, sections in payload_batches:
             latest_ts = max(
                 (
@@ -1044,33 +1056,27 @@ class SteamUpdatePush(Star):
                 ),
                 default=int(datetime.now().timestamp()),
             )
-            publish_text = datetime.fromtimestamp(latest_ts).strftime("%Y/%m/%d %H:%M")
-
-            if mode == "text":
-                text = self._build_text_message(sections, publish_text)
-                await self._push_text(group_ids, text)
-                continue
-
-            image_bytes = await self._render_card(
+            publish_text = datetime.fromtimestamp(
+                latest_ts
+            ).strftime("%Y/%m/%d %H:%M")
+            result = await self._deliver_poll_payload(
+                targets,
                 sections,
                 publish_text,
                 query_text,
-                card_kind=card_kind,
+                card_kind,
+                mode,
             )
-            if image_bytes:
-                sent = await self._push_image(group_ids, image_bytes)
-                if not sent:
-                    self._log_warn(
-                        "poll",
-                        "image push failed, fallback to text",
-                        trace=trace,
-                        card_kind=card_kind,
-                    )
-                    text = self._build_text_message(sections, publish_text)
-                    await self._push_text(group_ids, text)
-            else:
-                text = self._build_text_message(sections, publish_text)
-                await self._push_text(group_ids, text)
+            push_results.append(result)
+            if result.failed:
+                self._log_warn(
+                    "poll",
+                    "payload has failed targets",
+                    trace=trace,
+                    card_kind=card_kind,
+                    failed_count=len(result.failed),
+                    succeeded_count=len(result.succeeded),
+                )
         self._log_debug(
             "poll",
             "push finished",
@@ -1080,8 +1086,18 @@ class SteamUpdatePush(Star):
             free_game_attached_count=len(selected_free_game_items.attached_items),
             free_game_standalone_count=len(selected_free_game_items.standalone_items),
             payload_count=len(payload_batches),
-            groups=len(group_ids),
+            targets=len(targets),
         )
+
+        if not any(result.succeeded for result in push_results):
+            self._log_warn(
+                "poll",
+                "all notification sends failed; state preserved",
+                trace=trace,
+                payload_count=len(payload_batches),
+                target_count=len(targets),
+            )
+            return
 
         # update state only after push
         if app_state_updates:
@@ -1096,6 +1112,64 @@ class SteamUpdatePush(Star):
             return
         self._save_state(state)
         self._log_debug("poll", "state updated", trace=trace, state_size=len(state))
+
+    async def _deliver_poll_payload(
+        self,
+        targets: list[NotifyTarget],
+        sections: list[AppSection],
+        publish_text: str,
+        query_text: str,
+        card_kind: str,
+        mode: str,
+    ) -> PushResult:
+        if mode == "text":
+            text = self._build_text_message(
+                sections,
+                publish_text,
+            )
+            return await self._push_text(targets, text)
+
+        image_bytes = await self._render_card(
+            sections,
+            publish_text,
+            query_text,
+            card_kind=card_kind,
+        )
+        if not image_bytes:
+            text = self._build_text_message(
+                sections,
+                publish_text,
+            )
+            return await self._push_text(targets, text)
+
+        image_result = await self._push_image(
+            targets,
+            image_bytes,
+        )
+        if not image_result.failed:
+            return image_result
+
+        self._log_warn(
+            "poll",
+            "image target failed, fallback to text",
+            card_kind=card_kind,
+            failed_count=len(image_result.failed),
+        )
+        text = self._build_text_message(
+            sections,
+            publish_text,
+        )
+        text_result = await self._push_text(
+            image_result.failed,
+            text,
+        )
+        return PushResult(
+            succeeded=(
+                list(image_result.succeeded)
+                + list(text_result.succeeded)
+            ),
+            failed=list(text_result.failed),
+        )
 
     async def _manual_query(self, umo: str | None = None, query_kind: str = "all"):
         await self._ensure_http_client()

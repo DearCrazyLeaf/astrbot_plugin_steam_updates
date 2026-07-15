@@ -205,6 +205,8 @@ class FreeGamesLogicTest(unittest.TestCase):
 
     def _make_plugin(self):
         plugin = object.__new__(self.mod.SteamUpdatePush)
+        plugin._last_platform_id = None
+        plugin._last_bot = None
         plugin._trace_seq = 0
         plugin._log_warn = lambda *args, **kwargs: None
         plugin._log_debug = lambda *args, **kwargs: None
@@ -234,6 +236,7 @@ class FreeGamesLogicTest(unittest.TestCase):
         config = {
             "enable_push": True,
             "notify_group_ids": ["10001"],
+            "platform_id": "test-platform",
             "steam_appids": ["730"],
             "message_mode": "card",
             "free_games_enable": True,
@@ -276,9 +279,12 @@ class FreeGamesLogicTest(unittest.TestCase):
             plugin._render_payloads.append((card_kind, sections))
             return b"img"
 
+        async def _push_success(targets, *args, **kwargs):
+            return self.mod.PushResult(list(targets), [])
+
         plugin._render_card = _render_card
-        plugin._push_image = self._async_return(True)
-        plugin._push_text = self._async_return(True)
+        plugin._push_image = _push_success
+        plugin._push_text = _push_success
         plugin._next_trace_id = lambda prefix: f"{prefix}-test"
         plugin._is_current_poll_instance = lambda: True
         return plugin
