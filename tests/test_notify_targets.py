@@ -564,7 +564,45 @@ class NotifyTargetsTest(unittest.TestCase):
 
 
 class NotifyContractTest(unittest.TestCase):
-    pass
+    def test_v1210_umo_configuration_and_docs_contract(self):
+        schema = json.loads(
+            (ROOT / "_conf_schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        basic = schema["basic_settings"]["items"]
+        notify_umos = basic["notify_umos"]
+
+        self.assertEqual(notify_umos["type"], "list")
+        self.assertEqual(notify_umos["default"], [])
+        self.assertEqual(
+            notify_umos["items"],
+            {"type": "string"},
+        )
+        self.assertIn("notify_group_ids", basic)
+        self.assertIn("platform_id", basic)
+
+        readme = (ROOT / "README.md").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "notify_umos",
+            "/sid",
+            "GroupMessage",
+            "FriendMessage",
+            "OtherMessage",
+            "steam_update_ping",
+        ):
+            self.assertIn(marker, readme)
+
+        changelog = (ROOT / "CHANGELOG.md").read_text(
+            encoding="utf-8"
+        )
+        metadata = (ROOT / "metadata.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("## v1.2.10", changelog)
+        self.assertIn("version: v1.2.10", metadata)
 
 
 if __name__ == "__main__":
