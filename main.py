@@ -307,12 +307,20 @@ class SteamUpdatePush(Star):
         legacy: bool,
         message_type: str = "",
     ) -> dict[str, Any]:
-        parts = value.split(":", 2)
-        detected_type = parts[1] if len(parts) == 3 else ""
+        detected_type = message_type
+        if not detected_type:
+            try:
+                detected_type = (
+                    MessageSession.from_str(value)
+                    .message_type
+                    .value
+                )
+            except Exception:
+                detected_type = ""
         return {
             "target_index": target_index,
             "target_ref": self._target_ref(value),
-            "message_type": message_type or detected_type,
+            "message_type": detected_type,
             "legacy": legacy,
         }
 
@@ -1163,12 +1171,18 @@ class SteamUpdatePush(Star):
             image_result.failed,
             text,
         )
+        succeeded_targets = set(image_result.succeeded)
+        succeeded_targets.update(text_result.succeeded)
+        failed_targets = set(text_result.failed)
         return PushResult(
-            succeeded=(
-                list(image_result.succeeded)
-                + list(text_result.succeeded)
-            ),
-            failed=list(text_result.failed),
+            succeeded=[
+                target for target in targets
+                if target in succeeded_targets
+            ],
+            failed=[
+                target for target in targets
+                if target in failed_targets
+            ],
         )
 
     async def _manual_query(self, umo: str | None = None, query_kind: str = "all"):

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import tempfile
 import unittest
@@ -416,6 +417,35 @@ class NotifyTargetsTest(unittest.TestCase):
         self.assertIn("target_ref", rendered_logs)
         self.assertIn("message_type", rendered_logs)
 
+    def test_invalid_umo_log_omits_unvalidated_message_type(self):
+        plugin = self._make_plugin()
+        value = "qq-a:123456789:secret"
+
+        target = plugin._parse_notify_target(
+            value,
+            target_index=1,
+        )
+
+        self.assertIsNone(target)
+        target_warnings = [
+            kwargs
+            for args, kwargs in plugin._warnings
+            if args == ("notify_target", "invalid umo")
+        ]
+        self.assertEqual(
+            target_warnings,
+            [
+                {
+                    "target_index": 1,
+                    "target_ref": hashlib.sha256(
+                        value.encode("utf-8")
+                    ).hexdigest()[:12],
+                    "message_type": "",
+                    "legacy": False,
+                }
+            ],
+        )
+
     def test_manual_permission_uses_full_umo_or_legacy_group_id(self):
         plugin = self._make_plugin(
             {
@@ -479,6 +509,54 @@ class NotifyTargetsTest(unittest.TestCase):
         asyncio.run(plugin._poll_once())
 
         self.assertEqual(calls, {"http": 0, "state": 0})
+
+    def test_deliver_poll_payload_preserves_target_order_after_fallback(self):
+        plugin = self._make_plugin()
+        targets = [
+            self._target("qq-a:GroupMessage:100"),
+            self._target("qq-b:FriendMessage:200"),
+            self._target("qq-c:OtherMessage:300"),
+            self._target("qq-d:GroupMessage:400"),
+        ]
+        text_calls = []
+
+        async def render_card(*args, **kwargs):
+            return b"image"
+
+        async def push_image(received, image_bytes):
+            return self.mod.PushResult(
+                [targets[1]],
+                [targets[0], targets[2], targets[3]],
+            )
+
+        async def push_text(received, text):
+            text_calls.append(list(received))
+            return self.mod.PushResult(
+                [targets[0], targets[2]],
+                [targets[3]],
+            )
+
+        plugin._render_card = render_card
+        plugin._build_text_message = (
+            lambda sections, publish_text: "text"
+        )
+        plugin._push_image = push_image
+        plugin._push_text = push_text
+
+        result = asyncio.run(
+            plugin._deliver_poll_payload(
+                targets,
+                [],
+                "published",
+                "queried",
+                "game",
+                "card",
+            )
+        )
+
+        self.assertEqual(text_calls, [[targets[0], targets[2], targets[3]]])
+        self.assertEqual(result.succeeded, targets[:3])
+        self.assertEqual(result.failed, [targets[3]])
 
     def test_poll_text_fallback_only_uses_image_failed_targets(self):
         plugin = self._make_poll_plugin()
@@ -581,6 +659,15 @@ class NotifyContractTest(unittest.TestCase):
         )
         self.assertIn("notify_group_ids", basic)
         self.assertIn("platform_id", basic)
+        basic_keys = list(basic)
+        self.assertLess(
+            basic_keys.index("notify_umos"),
+            basic_keys.index("notify_group_ids"),
+        )
+        self.assertLess(
+            basic_keys.index("notify_group_ids"),
+            basic_keys.index("platform_id"),
+        )
 
         readme = (ROOT / "README.md").read_text(
             encoding="utf-8"
@@ -592,6 +679,17 @@ class NotifyContractTest(unittest.TestCase):
             "FriendMessage",
             "OtherMessage",
             "steam_update_ping",
+        ):
+            self.assertIn(marker, readme)
+
+        for marker in (
+            "notify_umos 中的目标优先",
+            "新旧目标规范化为 UMO 后保序去重",
+            "主动消息能否发送取决于对应平台适配器的能力",
+            "AstrBot 的 QQ 官方 API 适配器不支持该主动发送接口",
+            "文本只补发给该图片失败目标",
+            "全部目标均发送失败时，插件保留本轮轮询状态",
+            "手动查询仍限群聊",
         ):
             self.assertIn(marker, readme)
 
