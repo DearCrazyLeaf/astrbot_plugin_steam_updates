@@ -32,6 +32,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.message.components import Image, Plain
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
@@ -81,6 +82,19 @@ class RenderBlock:
     image: PilImage.Image | None = None
 
 
+@dataclass(frozen=True)
+class NotifyTarget:
+    umo: str
+    platform_id: str
+    legacy_group_id: str = ""
+
+
+@dataclass
+class PushResult:
+    succeeded: list[NotifyTarget]
+    failed: list[NotifyTarget]
+
+
 class SteamUpdatePush(Star):
     _CFG_GROUP_KEYS = (
         "basic_settings",
@@ -110,7 +124,7 @@ class SteamUpdatePush(Star):
         self._client_signature: str = ""
         self._poll_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
-        self._last_platform_name: str | None = None
+        self._last_platform_id: str | None = None
         self._last_bot: Any | None = None
         self._appid_name_map: dict[str, Any] | None = None
         self._name_cache: dict[str, str] | None = None
@@ -275,6 +289,177 @@ class SteamUpdatePush(Star):
             return default
         except Exception:
             return default
+
+    def _cfg_list_values(self, key: str) -> list[str]:
+        raw = self._cfg(key, []) or []
+        values = raw if isinstance(raw, (list, tuple)) else [raw]
+        return [str(value or "").strip() for value in values]
+
+    @staticmethod
+    def _target_ref(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+    def _target_log_fields(
+        self,
+        value: str,
+        target_index: int,
+        *,
+        legacy: bool,
+        message_type: str = "",
+    ) -> dict[str, Any]:
+        detected_type = message_type
+        if not detected_type:
+            try:
+                detected_type = (
+                    MessageSession.from_str(value)
+                    .message_type
+                    .value
+                )
+            except Exception:
+                detected_type = ""
+        return {
+            "target_index": target_index,
+            "target_ref": self._target_ref(value),
+            "message_type": detected_type,
+            "legacy": legacy,
+        }
+
+    def _invalid_notify_target(
+        self,
+        value: str,
+        target_index: int,
+        *,
+        legacy: bool,
+    ) -> None:
+        self._log_warn(
+            "notify_target",
+            "invalid umo",
+            **self._target_log_fields(
+                value,
+                target_index,
+                legacy=legacy,
+            ),
+        )
+        return None
+
+    def _parse_notify_target(
+        self,
+        value: str,
+        *,
+        target_index: int,
+        legacy_group_id: str = "",
+    ) -> NotifyTarget | None:
+        legacy = bool(legacy_group_id)
+        if not value:
+            return self._invalid_notify_target(
+                value,
+                target_index,
+                legacy=legacy,
+            )
+        try:
+            session = MessageSession.from_str(value)
+        except Exception:
+            return self._invalid_notify_target(
+                value,
+                target_index,
+                legacy=legacy,
+            )
+        normalized = str(session)
+        return NotifyTarget(
+            umo=normalized,
+            platform_id=str(session.platform_id),
+            legacy_group_id=legacy_group_id,
+        )
+
+    def _resolve_notify_targets(self) -> list[NotifyTarget]:
+        targets: list[NotifyTarget] = []
+        seen: set[str] = set()
+
+        def append(target: NotifyTarget | None) -> None:
+            if target is None or target.umo in seen:
+                return
+            seen.add(target.umo)
+            targets.append(target)
+
+        for index, value in enumerate(
+            self._cfg_list_values("notify_umos"),
+            start=1,
+        ):
+            append(
+                self._parse_notify_target(
+                    value,
+                    target_index=index,
+                )
+            )
+
+        platform_id = str(self._cfg("platform_id", "") or "").strip()
+        if not platform_id:
+            platform_id = str(self._last_platform_id or "").strip()
+
+        for index, value in enumerate(
+            self._cfg_list_values("notify_group_ids"),
+            start=1,
+        ):
+            if ":" in value:
+                append(
+                    self._parse_notify_target(
+                        value,
+                        target_index=index,
+                    )
+                )
+                continue
+            if not value:
+                continue
+            if not platform_id:
+                self._log_warn(
+                    "notify_target",
+                    "legacy target missing platform id",
+                    **self._target_log_fields(
+                        value,
+                        index,
+                        legacy=True,
+                        message_type="GroupMessage",
+                    ),
+                )
+                continue
+            append(
+                self._parse_notify_target(
+                    f"{platform_id}:GroupMessage:{value}",
+                    target_index=index,
+                    legacy_group_id=value,
+                )
+            )
+        return targets
+
+    def _manual_query_allowed(
+        self,
+        event_umo: str,
+        group_id: str,
+    ) -> bool:
+        legacy_values = self._cfg_list_values("notify_group_ids")
+        if group_id and group_id in {
+            value
+            for value in legacy_values
+            if value and ":" not in value
+        }:
+            return True
+        try:
+            normalized_event = str(MessageSession.from_str(event_umo))
+        except Exception:
+            return False
+
+        configured_full = self._cfg_list_values("notify_umos")
+        configured_full.extend(
+            value for value in legacy_values if ":" in value
+        )
+        for index, value in enumerate(configured_full, start=1):
+            target = self._parse_notify_target(
+                value,
+                target_index=index,
+            )
+            if target is not None and target.umo == normalized_event:
+                return True
+        return False
 
     def _debug(self, msg: str):
         if self._cfg("debug_log", False):
@@ -676,20 +861,31 @@ class SteamUpdatePush(Star):
                 logger.exception("[steam_updates][poll] loop execution failed")
 
     async def _poll_once(self):
-        await self._ensure_http_client()
         trace = self._next_trace_id("poll")
         self._log_debug("poll", "start", trace=trace)
         if not self._is_current_poll_instance():
-            self._log_warn("poll", "skip: stale poll instance", trace=trace)
+            self._log_warn(
+                "poll",
+                "skip: stale poll instance",
+                trace=trace,
+            )
             return
         if not bool(self._cfg("enable_push", True)):
-            self._log_debug("poll", "skip: plugin disabled", trace=trace)
+            self._log_debug(
+                "poll",
+                "skip: plugin disabled",
+                trace=trace,
+            )
             return
-        group_ids = [str(x).strip() for x in self._cfg("notify_group_ids", []) or []]
-        group_ids = [g for g in group_ids if g]
-        if not group_ids:
-            self._log_debug("poll", "skip: notify_group_ids empty", trace=trace)
+        targets = self._resolve_notify_targets()
+        if not targets:
+            self._log_debug(
+                "poll",
+                "skip: no valid notification targets",
+                trace=trace,
+            )
             return
+        await self._ensure_http_client()
         appids = self._normalize_appids(self._cfg("steam_appids", []))
         free_games_enabled = self._free_games_enabled()
         workshop_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
@@ -708,7 +904,7 @@ class SteamUpdatePush(Star):
             trace=trace,
             app_count=len(appids),
             workshop_count=len(workshop_ids) if workshop_enabled else 0,
-            group_count=len(group_ids),
+            target_count=len(targets),
             max_days=max_days,
             fetch_count=fetch_count,
         )
@@ -826,7 +1022,7 @@ class SteamUpdatePush(Star):
             free_game_new_count=len(new_free_game_items),
             free_game_attached_count=len(selected_free_game_items.attached_items),
             free_game_standalone_count=len(selected_free_game_items.standalone_items),
-            groups=len(group_ids),
+            targets=len(targets),
         )
         if not self._is_current_poll_instance():
             self._log_warn("poll", "abort push: stale poll instance", trace=trace)
@@ -857,6 +1053,7 @@ class SteamUpdatePush(Star):
 
         query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
         mode = str(self._cfg("message_mode", "card")).lower()
+        push_results: list[PushResult] = []
         for card_kind, sections in payload_batches:
             latest_ts = max(
                 (
@@ -867,33 +1064,27 @@ class SteamUpdatePush(Star):
                 ),
                 default=int(datetime.now().timestamp()),
             )
-            publish_text = datetime.fromtimestamp(latest_ts).strftime("%Y/%m/%d %H:%M")
-
-            if mode == "text":
-                text = self._build_text_message(sections, publish_text)
-                await self._push_text(group_ids, text)
-                continue
-
-            image_bytes = await self._render_card(
+            publish_text = datetime.fromtimestamp(
+                latest_ts
+            ).strftime("%Y/%m/%d %H:%M")
+            result = await self._deliver_poll_payload(
+                targets,
                 sections,
                 publish_text,
                 query_text,
-                card_kind=card_kind,
+                card_kind,
+                mode,
             )
-            if image_bytes:
-                sent = await self._push_image(group_ids, image_bytes)
-                if not sent:
-                    self._log_warn(
-                        "poll",
-                        "image push failed, fallback to text",
-                        trace=trace,
-                        card_kind=card_kind,
-                    )
-                    text = self._build_text_message(sections, publish_text)
-                    await self._push_text(group_ids, text)
-            else:
-                text = self._build_text_message(sections, publish_text)
-                await self._push_text(group_ids, text)
+            push_results.append(result)
+            if result.failed:
+                self._log_warn(
+                    "poll",
+                    "payload has failed targets",
+                    trace=trace,
+                    card_kind=card_kind,
+                    failed_count=len(result.failed),
+                    succeeded_count=len(result.succeeded),
+                )
         self._log_debug(
             "poll",
             "push finished",
@@ -903,8 +1094,18 @@ class SteamUpdatePush(Star):
             free_game_attached_count=len(selected_free_game_items.attached_items),
             free_game_standalone_count=len(selected_free_game_items.standalone_items),
             payload_count=len(payload_batches),
-            groups=len(group_ids),
+            targets=len(targets),
         )
+
+        if not any(result.succeeded for result in push_results):
+            self._log_warn(
+                "poll",
+                "all notification sends failed; state preserved",
+                trace=trace,
+                payload_count=len(payload_batches),
+                target_count=len(targets),
+            )
+            return
 
         # update state only after push
         if app_state_updates:
@@ -919,6 +1120,70 @@ class SteamUpdatePush(Star):
             return
         self._save_state(state)
         self._log_debug("poll", "state updated", trace=trace, state_size=len(state))
+
+    async def _deliver_poll_payload(
+        self,
+        targets: list[NotifyTarget],
+        sections: list[AppSection],
+        publish_text: str,
+        query_text: str,
+        card_kind: str,
+        mode: str,
+    ) -> PushResult:
+        if mode == "text":
+            text = self._build_text_message(
+                sections,
+                publish_text,
+            )
+            return await self._push_text(targets, text)
+
+        image_bytes = await self._render_card(
+            sections,
+            publish_text,
+            query_text,
+            card_kind=card_kind,
+        )
+        if not image_bytes:
+            text = self._build_text_message(
+                sections,
+                publish_text,
+            )
+            return await self._push_text(targets, text)
+
+        image_result = await self._push_image(
+            targets,
+            image_bytes,
+        )
+        if not image_result.failed:
+            return image_result
+
+        self._log_warn(
+            "poll",
+            "image target failed, fallback to text",
+            card_kind=card_kind,
+            failed_count=len(image_result.failed),
+        )
+        text = self._build_text_message(
+            sections,
+            publish_text,
+        )
+        text_result = await self._push_text(
+            image_result.failed,
+            text,
+        )
+        succeeded_targets = set(image_result.succeeded)
+        succeeded_targets.update(text_result.succeeded)
+        failed_targets = set(text_result.failed)
+        return PushResult(
+            succeeded=[
+                target for target in targets
+                if target in succeeded_targets
+            ],
+            failed=[
+                target for target in targets
+                if target in failed_targets
+            ],
+        )
 
     async def _manual_query(self, umo: str | None = None, query_kind: str = "all"):
         await self._ensure_http_client()
@@ -3551,69 +3816,134 @@ class SteamUpdatePush(Star):
         return ImageFont.load_default()
 
     # --- send ---
-    async def _push_text(self, group_ids: list[str], text: str) -> bool:
+    async def _push_text(
+        self,
+        targets: list[NotifyTarget],
+        text: str,
+    ) -> PushResult:
         chain = MessageChain(chain=[Plain(text)])
-        return await self._push_chain(group_ids, chain)
+        return await self._push_chain(targets, chain)
 
-    async def _push_image(self, group_ids: list[str], image_bytes: bytes) -> bool:
+    async def _push_image(
+        self,
+        targets: list[NotifyTarget],
+        image_bytes: bytes,
+    ) -> PushResult:
         path = self._save_temp_image(image_bytes)
         if not path:
             self._log_warn("push", "save temp image failed")
-            return False
+            return PushResult([], list(targets))
         try:
             chain = MessageChain(chain=[Image(file=path)])
         except Exception as exc:
-            self._log_warn("push", "build image chain failed", path=path, error=exc)
+            self._log_warn(
+                "push",
+                "build image chain failed",
+                error_type=type(exc).__name__,
+            )
+            return PushResult([], list(targets))
+        return await self._push_chain(targets, chain)
+
+    async def _push_chain(
+        self,
+        targets: list[NotifyTarget],
+        chain: MessageChain,
+    ) -> PushResult:
+        self._log_debug(
+            "push",
+            "start",
+            target_count=len(targets),
+            chain_size=len(chain.chain),
+        )
+        succeeded: list[NotifyTarget] = []
+        failed: list[NotifyTarget] = []
+        for index, target in enumerate(targets, start=1):
+            sent = await self._send_to_target(
+                target,
+                chain,
+                target_index=index,
+            )
+            fields = self._target_log_fields(
+                target.umo,
+                index,
+                legacy=bool(target.legacy_group_id),
+            )
+            if sent:
+                succeeded.append(target)
+                self._log_debug("push", "target sent", **fields)
+            else:
+                failed.append(target)
+                self._log_warn("push", "target failed", **fields)
+        return PushResult(succeeded, failed)
+
+    async def _send_to_target(
+        self,
+        target: NotifyTarget,
+        chain: MessageChain,
+        target_index: int,
+    ) -> bool:
+        fields = self._target_log_fields(
+            target.umo,
+            target_index,
+            legacy=bool(target.legacy_group_id),
+        )
+        try:
+            sent = await self.context.send_message(
+                session=target.umo,
+                message_chain=chain,
+            )
+            if sent is True:
+                self._log_debug("send", "via session", **fields)
+                return True
+            self._log_warn(
+                "send",
+                "session returned false",
+                **fields,
+            )
+        except Exception as exc:
+            self._log_warn(
+                "send",
+                "session failed",
+                error_type=type(exc).__name__,
+                **fields,
+            )
+
+        if not target.legacy_group_id:
             return False
-        return await self._push_chain(group_ids, chain)
-
-    async def _push_chain(self, group_ids: list[str], chain: MessageChain) -> bool:
-        self._log_debug("push", "start", group_count=len(group_ids), chain_size=len(chain.chain))
-        any_success = False
-        for gid in group_ids:
-            sent = await self._send_to_group(gid, chain)
-            if not sent:
-                self._log_warn("push", "group failed", group_id=gid)
-            else:
-                self._log_debug("push", "group sent", group_id=gid)
-                any_success = True
-        return any_success
-
-    async def _send_to_group(self, group_id: str, chain: MessageChain) -> bool:
-        session = self._build_session_id(group_id)
-        if session:
-            try:
-                await self.context.send_message(session=session, message_chain=chain)
-                self._log_debug("send", "via session", group_id=group_id, session=session)
-                return True
-            except Exception as exc:
-                self._log_warn("send", "session failed", group_id=group_id, session=session, error=exc)
-
-        # fallback: aiocqhttp bot
-        if self._last_bot and hasattr(self._last_bot, "send_group_msg"):
-            try:
-                await self._last_bot.send_group_msg(
-                    group_id=int(group_id), message=chain.chain
-                )
-                self._log_debug("send", "via bot", group_id=group_id)
-                return True
-            except Exception as exc:
-                self._log_warn("send", "bot fallback failed", group_id=group_id, error=exc)
-        else:
-            self._log_warn("send", "no available sender", group_id=group_id)
-        return False
-
-    def _build_session_id(self, group_id: str) -> str | None:
-        if ":" in group_id:
-            return group_id
-        platform_id = str(self._cfg("platform_id", "")).strip()
-        if not platform_id:
-            if self._last_platform_name:
-                platform_id = self._last_platform_name
-            else:
-                self._log_warn("send", "platform id unresolved", group_id=group_id)
-                return None
-        return f"{platform_id}:GroupMessage:{group_id}"
+        if target.platform_id != str(
+            self._last_platform_id or ""
+        ).strip():
+            return False
+        if not self._last_bot or not hasattr(
+            self._last_bot,
+            "send_group_msg",
+        ):
+            return False
+        legacy_group_id = target.legacy_group_id
+        if not (
+            legacy_group_id.isascii()
+            and legacy_group_id.isdigit()
+        ):
+            return False
+        try:
+            group_id = int(legacy_group_id)
+        except (TypeError, ValueError):
+            return False
+        try:
+            await self._last_bot.send_group_msg(
+                group_id=group_id,
+                message=chain.chain,
+            )
+            self._log_debug("send", "via bot", **fields)
+            return True
+        except Exception as exc:
+            self._log_warn(
+                "send",
+                "bot fallback failed",
+                error_type=type(exc).__name__,
+                **fields,
+            )
+            return False
 
     def _save_temp_image(self, image_bytes: bytes) -> str | None:
         if not image_bytes:
@@ -3627,7 +3957,11 @@ class SteamUpdatePush(Star):
             self._trim_temp_dir(temp_dir, keep=10)
             return str(path)
         except Exception as exc:
-            self._debug(f"save temp image failed: {exc}")
+            self._log_warn(
+                "push",
+                "save temp image failed",
+                error_type=type(exc).__name__,
+            )
             return None
 
     def _trim_temp_dir(self, temp_dir: Path, keep: int = 10) -> None:
@@ -3730,14 +4064,14 @@ class SteamUpdatePush(Star):
             yield event.plain_result("插件未启用")
             return
 
-        allowed = [str(x).strip() for x in self._cfg("notify_group_ids", []) or []]
-        allowed = [g for g in allowed if g]
-        if not allowed:
-            self._log_warn("manual_cmd", "reject: notify_group_ids empty", group_id=group_id, user_id=user_id)
-            yield event.plain_result("未配置生效群，手动查询已禁用")
-            return
-        if group_id not in allowed:
-            self._log_warn("manual_cmd", "reject: group not allowed", group_id=group_id, user_id=user_id)
+        event_umo = str(event.unified_msg_origin or "").strip()
+        if not self._manual_query_allowed(event_umo, group_id):
+            self._log_warn(
+                "manual_cmd",
+                "reject: group not allowed",
+                group_id=group_id,
+                user_id=user_id,
+            )
             yield event.plain_result("当前群未启用插件")
             return
 
@@ -3778,14 +4112,19 @@ class SteamUpdatePush(Star):
 
     @filter.command("steam_update_ping")
     async def steam_update_ping(self, event: AstrMessageEvent):
-        """捕获平台信息用于推送（可隐藏）"""
-        self._last_platform_name = event.get_platform_name()
-        if isinstance(event, AiocqhttpMessageEvent):
-            self._last_bot = event.bot
+        """捕获平台实例信息用于旧群号推送兼容。"""
+        self._last_platform_id = str(
+            event.get_platform_id() or ""
+        ).strip()
+        self._last_bot = (
+            event.bot
+            if isinstance(event, AiocqhttpMessageEvent)
+            else None
+        )
         self._log_debug(
             "ping",
             "captured sender context",
-            platform=self._last_platform_name,
+            platform_ref=self._target_ref(self._last_platform_id),
             has_bot=bool(self._last_bot),
         )
         yield event.plain_result("Steam 更新推送已就绪")

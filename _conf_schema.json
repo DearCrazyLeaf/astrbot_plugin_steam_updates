@@ -2,27 +2,36 @@
   "basic_settings": {
     "description": "基础设置",
     "type": "object",
-    "hint": "插件开关、目标群与消息展示方式",
+    "hint": "插件开关、推送目标与消息展示方式",
     "items": {
       "enable_push": {
         "description": "启用插件",
         "type": "bool",
         "default": true
       },
-      "notify_group_ids": {
-        "description": "推送群号列表",
+      "notify_umos": {
+        "description": "推送 UMO 列表",
         "type": "list",
         "default": [],
-        "hint": "仅列表内群会接收推送",
+        "hint": "填写 /sid 返回的完整 UMO，可配置多个平台和适配器实例",
+        "items": {
+          "type": "string"
+        }
+      },
+      "notify_group_ids": {
+        "description": "推送群号列表（兼容旧配置）",
+        "type": "list",
+        "default": [],
+        "hint": "旧配置兼容字段；纯群号通过 platform_id 转换为 GroupMessage UMO",
         "items": {
           "type": "string"
         }
       },
       "platform_id": {
-        "description": "平台 ID（可选）",
+        "description": "旧群号平台实例 ID（可选）",
         "type": "string",
         "default": "",
-        "hint": "例如 chatbot2；不填则需先发送 steam_update_ping 以捕获平台"
+        "hint": "例如 chatbot2；留空时可发送 steam_update_ping 捕获平台实例 ID"
       },
       "message_mode": {
         "description": "消息模式",
