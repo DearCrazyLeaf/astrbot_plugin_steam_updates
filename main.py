@@ -2484,14 +2484,17 @@ class SteamUpdatePush(Star):
         items = data.get("appnews", {}).get("newsitems", []) or []
         results: list[NewsItem] = []
         for item in items:
+            contents = str(item.get("contents", ""))
+            image_candidates = self._extract_news_image_candidates(contents)
             results.append(
                 NewsItem(
                     gid=str(item.get("gid", "")),
                     title=str(item.get("title", "")),
                     url=str(item.get("url", "")),
-                    contents=str(item.get("contents", "")),
+                    contents=contents,
                     date=int(item.get("date", 0)),
                     appid=str(appid),
+                    image_url=image_candidates[0] if image_candidates else "",
                 )
             )
         self._log_debug(
@@ -2536,6 +2539,24 @@ class SteamUpdatePush(Star):
         except Exception:
             return 0
 
+    def _first_feed_image_url(self, item: ET.Element, description: str) -> str:
+        markup = html.unescape(description or "")
+        for match in re.finditer(
+            r"(?is)<img\b[^>]*?\bsrc\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))",
+            markup,
+        ):
+            source = next((value for value in match.groups() if value), "")
+            candidates = self._extract_news_image_candidates(source)
+            if candidates:
+                return candidates[0]
+        for child in item.iter():
+            if child.tag.rsplit("}", 1)[-1].lower() != "enclosure":
+                continue
+            candidates = self._extract_news_image_candidates(child.attrib.get("url", ""))
+            if candidates:
+                return candidates[0]
+        return ""
+
     async def _fetch_news_feed(self, appid: str, count: int) -> list[NewsItem]:
         feed_url = STEAM_NEWS_FEED_API.format(appid=appid)
         params = {"l": self._steam_lang()}
@@ -2564,6 +2585,7 @@ class SteamUpdatePush(Star):
             desc = (item.findtext("description") or "").strip()
             ts = self._parse_feed_pub_ts(pub_date)
             gid = self._gid_from_feed(link, title, ts)
+            image_url = self._first_feed_image_url(item, desc)
             results.append(
                 NewsItem(
                     gid=gid,
@@ -2572,6 +2594,7 @@ class SteamUpdatePush(Star):
                     contents=self._feed_text_to_plain(desc),
                     date=ts,
                     appid=str(appid),
+                    image_url=image_url,
                 )
             )
         self._log_debug(
@@ -2936,6 +2959,7 @@ class SteamUpdatePush(Star):
                 sections.append(AppSection(appid=appid, title=title, updates=items))
                 continue
             latest_ts = max((it.date for it in items if it.date), default=items[0].date)
+            image_url = next((it.image_url for it in items if it.image_url), "")
             merged = NewsItem(
                 gid=items[0].gid,
                 title=items[0].title or "更新内容",
@@ -2943,7 +2967,7 @@ class SteamUpdatePush(Star):
                 contents=llm_text,
                 date=latest_ts,
                 appid=items[0].appid,
-                image_url=items[0].image_url,
+                image_url=image_url,
             )
             sections.append(AppSection(appid=appid, title=title, updates=[merged]))
         return sections
@@ -3499,27 +3523,44 @@ class SteamUpdatePush(Star):
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
-    def _extract_image_urls(self, text: str) -> list[str]:
+    def _extract_news_image_candidates(self, text: str) -> list[str]:
         if not text:
             return []
         urls: list[str] = []
-        ext_urls = re.findall(r"https?://\S+\.(?:png|jpg|jpeg|webp|gif)(?:\?\S+)?", text, flags=re.I)
-        for u in ext_urls:
-            candidate = u.rstrip(")")
-            if candidate and candidate not in urls:
-                urls.append(candidate)
-
-        # Steam UGC image links may not carry a file extension.
-        raw_urls = re.findall(r"https?://[^\s)]+", text, flags=re.I)
-        for u in raw_urls:
-            candidate = u.rstrip(")")
-            if not candidate or candidate in urls:
-                continue
-            lower = candidate.lower()
-            if "steamusercontent.com/ugc/" in lower:
-                urls.append(candidate)
-
+        pattern = re.compile(
+            r"(?P<localized>\{STEAM_CLAN_LOC_IMAGE\}/(?P<localized_path>[^\s<>\"'\[\]]+))"
+            r"|(?P<clan>\{STEAM_CLAN_IMAGE\}/(?P<clan_path>[^\s<>\"'\[\]]+))"
+            r"|(?P<url>https?://[^\s<>\"'\[\]]+)",
+            flags=re.I,
+        )
+        base = "https://clan.fastly.steamstatic.com/images/"
+        for match in pattern.finditer(text):
+            candidates: list[str] = []
+            if match.group("localized"):
+                path = match.group("localized_path").rstrip(").,;")
+                clanid, separator, filename = path.partition("/")
+                if separator and filename:
+                    stem, suffix = os.path.splitext(filename)
+                    candidates.append(f"{base}{clanid}/{stem}/{self._steam_lang()}{suffix}")
+                    candidates.append(f"{base}{clanid}/{filename}")
+            elif match.group("clan"):
+                path = match.group("clan_path").rstrip(").,;")
+                candidates.append(f"{base}{path}")
+            else:
+                candidate = match.group("url").rstrip(").,;")
+                lower = candidate.lower()
+                path = lower.split("?", 1)[0]
+                if path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+                    candidates.append(candidate)
+                elif "steamusercontent.com/ugc/" in lower:
+                    candidates.append(candidate)
+            for candidate in candidates:
+                if candidate and candidate not in urls:
+                    urls.append(candidate)
         return urls
+
+    def _extract_image_urls(self, text: str) -> list[str]:
+        return self._extract_news_image_candidates(text)
 
     def _news_image_cache_path(self, url: str) -> Path:
         key = hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest()
