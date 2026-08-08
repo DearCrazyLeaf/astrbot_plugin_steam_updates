@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -192,6 +193,173 @@ class NewsImageParsingTest(unittest.IsolatedAsyncioTestCase):
             return value
 
         return _inner
+
+
+class NewsImageSelectionTest(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_module()
+
+    def _make_plugin(self):
+        plugin = object.__new__(self.mod.SteamUpdatePush)
+        plugin._client = object()
+        plugin._steam_lang = lambda: "english"
+        plugin._cfg = lambda key, default=None: default
+        plugin._prefetch_image_concurrency = lambda: 2
+        plugin._trim_news_image_cache = lambda: None
+        return plugin
+
+    async def test_prefetch_uses_first_successful_candidate_per_item(self):
+        plugin = self._make_plugin()
+        a_first = "https://clan.fastly.steamstatic.com/images/100/a-first.png"
+        a_second = "https://clan.fastly.steamstatic.com/images/100/a-second.png"
+        b_first = "https://clan.fastly.steamstatic.com/images/200/b-first.png"
+        b_second = "https://clan.fastly.steamstatic.com/images/200/b-second.png"
+        image_a = object()
+        image_b = object()
+        attempts = []
+        a_started = asyncio.Event()
+        b_started = asyncio.Event()
+        a_first_completed = False
+
+        async def download(url):
+            nonlocal a_first_completed
+            attempts.append(url)
+            if url == a_first:
+                a_started.set()
+                await asyncio.wait_for(b_started.wait(), timeout=1)
+                a_first_completed = True
+                return None
+            if url == a_second:
+                self.assertTrue(a_first_completed)
+                return image_a
+            if url == b_first:
+                b_started.set()
+                await asyncio.wait_for(a_started.wait(), timeout=1)
+                return image_b
+            self.fail(f"successful item requested another candidate: {url}")
+
+        plugin._download_image = download
+        sections = [
+            self.mod.AppSection(
+                "100",
+                "Game A",
+                [
+                    self.mod.NewsItem(
+                        "a",
+                        "Announcement A",
+                        "https://example.test/a",
+                        f"[img]{a_first}[/img] [img]{a_second}[/img]",
+                        1,
+                        "100",
+                        a_first,
+                    )
+                ],
+            ),
+            self.mod.AppSection(
+                "200",
+                "Game B",
+                [
+                    self.mod.NewsItem(
+                        "b",
+                        "Announcement B",
+                        "https://example.test/b",
+                        f"[img]{b_first}[/img] [img]{b_second}[/img]",
+                        2,
+                        "200",
+                        b_first,
+                    )
+                ],
+            ),
+        ]
+
+        result = await plugin._prefetch_images(sections)
+
+        self.assertEqual(result, {a_second: image_a, b_first: image_b})
+        self.assertLess(attempts.index(a_first), attempts.index(a_second))
+        self.assertNotIn(b_second, attempts)
+
+
+class NewsImageFallbackTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_module()
+
+    def _make_plugin(self):
+        plugin = object.__new__(self.mod.SteamUpdatePush)
+        plugin._steam_lang = lambda: "english"
+        plugin._load_font = lambda size, bold=False: _Font(size)
+        plugin._wrap_blocks = lambda *args, **kwargs: []
+        plugin._summarize_text = lambda text, max_chars: text
+        plugin._format_time = lambda ts: ""
+        plugin._scale_image = lambda image, max_w, max_h: image
+        return plugin
+
+    def test_each_announcement_uses_its_image_or_fixed_fallback(self):
+        plugin = self._make_plugin()
+        a_url = "https://clan.fastly.steamstatic.com/images/100/a.png"
+        b_url = "https://clan.fastly.steamstatic.com/images/100/b.png"
+        image_a = object()
+        fixed_image = object()
+        section = self.mod.AppSection(
+            "100",
+            "Game",
+            [
+                self.mod.NewsItem(
+                    "a",
+                    "Announcement A",
+                    "",
+                    f"[img]{a_url}[/img]",
+                    0,
+                    "100",
+                    a_url,
+                ),
+                self.mod.NewsItem(
+                    "b",
+                    "Announcement B",
+                    "",
+                    f"[img]{b_url}[/img]",
+                    0,
+                    "100",
+                    b_url,
+                ),
+                self.mod.NewsItem(
+                    "c",
+                    "Announcement C",
+                    "",
+                    "No image",
+                    0,
+                    "100",
+                ),
+            ],
+        )
+
+        blocks = plugin._build_section_blocks(
+            section,
+            796,
+            _Font(26),
+            _Font(18),
+            (220, 220, 220),
+            _Font(14),
+            (140, 140, 140),
+            (100, 180, 255),
+            {a_url: image_a},
+            796,
+            320,
+            1000,
+            1,
+            {"100": fixed_image},
+        )
+
+        self.assertEqual(
+            [block.image for block in blocks if block.kind == "image"],
+            [image_a, fixed_image, fixed_image],
+        )
+
+
+class _Font:
+    def __init__(self, size):
+        self.size = size
 
 
 if __name__ == "__main__":

@@ -3361,8 +3361,13 @@ class SteamUpdatePush(Star):
                 if u and max_imgs > 0:
                     image_urls = [u]
             else:
-                image_urls = self._extract_image_urls(item.contents)[: max(0, max_imgs)]
-            if not is_workshop_sec:
+                item_image = self._first_prefetched_item_image(item, image_map)
+                if item_image is None:
+                    item_image = header_map.get(sec.appid)
+                if item_image:
+                    item_image = self._scale_image(item_image, image_max_width, max_img_h)
+                    blocks.append(RenderBlock("image", image=item_image, gap=10))
+            if is_free_games_sec:
                 for url in image_urls:
                     img = image_map.get(url)
                     if img:
@@ -3381,10 +3386,11 @@ class SteamUpdatePush(Star):
                     if img:
                         img = self._scale_image(img, image_max_width, max_img_h)
                         blocks.append(RenderBlock("image", image=img, gap=10))
-        header_img = header_map.get(sec.appid)
-        if header_img:
-            header_img = self._scale_image(header_img, image_max_width, max_img_h)
-            blocks.append(RenderBlock("image", image=header_img, gap=14))
+        if is_workshop_sec or is_free_games_sec:
+            header_img = header_map.get(sec.appid)
+            if header_img:
+                header_img = self._scale_image(header_img, image_max_width, max_img_h)
+                blocks.append(RenderBlock("image", image=header_img, gap=14))
         blocks.append(RenderBlock("text", "", body_font, body_color, 8))
         return blocks
 
@@ -3562,6 +3568,26 @@ class SteamUpdatePush(Star):
     def _extract_image_urls(self, text: str) -> list[str]:
         return self._extract_news_image_candidates(text)
 
+    def _item_image_candidates(self, item: NewsItem) -> list[str]:
+        candidates: list[str] = []
+        image_url = str(getattr(item, "image_url", "") or "").strip()
+        if image_url:
+            candidates.append(image_url)
+        for url in self._extract_news_image_candidates(item.contents):
+            if url not in candidates:
+                candidates.append(url)
+        return candidates
+
+    def _first_prefetched_item_image(
+        self,
+        item: NewsItem,
+        image_map: dict[str, PilImage.Image],
+    ) -> PilImage.Image | None:
+        for url in self._item_image_candidates(item):
+            if image_map.get(url):
+                return image_map[url]
+        return None
+
     def _news_image_cache_path(self, url: str) -> Path:
         key = hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest()
         return self._news_image_dir / f"{key}.bin"
@@ -3665,36 +3691,46 @@ class SteamUpdatePush(Star):
     async def _prefetch_images(self, sections: list[AppSection]) -> dict[str, PilImage.Image]:
         if not self._client:
             return {}
-        urls: list[str] = []
+        ordinary_candidates: list[list[str]] = []
+        special_urls: list[str] = []
         max_imgs = int(self._cfg("image_max_per_item", 1))
         for sec in sections:
             is_workshop_sec = str(sec.appid).strip().lower().startswith("workshop")
             is_free_games_sec = str(sec.appid).strip().lower() == "free_games"
             for item in sec.updates:
-                candidates: list[str] = []
                 if is_workshop_sec or is_free_games_sec:
                     u = str(getattr(item, "image_url", "") or "").strip()
-                    if u and max_imgs > 0:
-                        candidates.append(u)
+                    if u and max_imgs > 0 and u not in special_urls:
+                        special_urls.append(u)
                 else:
-                    candidates.extend(self._extract_image_urls(item.contents)[: max(0, max_imgs)])
-                for url in candidates:
-                    if url not in urls:
-                        urls.append(url)
+                    candidates = self._item_image_candidates(item)
+                    if candidates and max_imgs > 0:
+                        ordinary_candidates.append(candidates)
 
-        if not urls:
+        if not ordinary_candidates and not special_urls:
             return {}
 
         semaphore = asyncio.Semaphore(self._prefetch_image_concurrency())
         results: dict[str, PilImage.Image] = {}
 
-        async def _fetch(url: str):
+        async def _fetch_first(candidates: list[str]):
+            async with semaphore:
+                for url in candidates:
+                    img = await self._download_image(url)
+                    if img:
+                        results[url] = img
+                        return
+
+        async def _fetch_special(url: str):
             async with semaphore:
                 img = await self._download_image(url)
-                if img:
-                    results[url] = img
+            if img:
+                results[url] = img
 
-        await asyncio.gather(*[_fetch(u) for u in urls])
+        await asyncio.gather(
+            *[_fetch_first(candidates) for candidates in ordinary_candidates],
+            *[_fetch_special(url) for url in special_urls],
+        )
         if results:
             self._trim_news_image_cache()
         return results
