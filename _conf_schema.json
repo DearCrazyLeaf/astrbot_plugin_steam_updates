@@ -275,9 +275,9 @@
     "hint": "图片渲染长度、下载超时、并发与冷却",
     "items": {
       "image_max_per_item": {
-        "description": "每条更新最多渲染图片数",
+        "description": "每条更新显示一张图片",
         "type": "int",
-        "default": 10
+        "default": 1
       },
       "image_max_height": {
         "description": "图片最大高度(px)",

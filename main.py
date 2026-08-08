@@ -80,6 +80,7 @@ class RenderBlock:
     color: tuple[int, int, int] = (255, 255, 255)
     gap: int = 0
     image: PilImage.Image | None = None
+    align: str = "left"
 
 
 @dataclass(frozen=True)
@@ -3139,9 +3140,13 @@ class SteamUpdatePush(Star):
                 y += self._font_height(block.font) + block.gap
             elif block.kind == "image":
                 if block.image:
+                    image_x = padding
+                    if block.align == "center":
+                        content_width = width - 2 * padding
+                        image_x += (content_width - block.image.width) // 2
                     img.paste(
                         block.image,
-                        (padding, y),
+                        (image_x, y),
                         block.image if block.image.mode == "RGBA" else None,
                     )
                     y += block.image.height + block.gap
@@ -3364,9 +3369,12 @@ class SteamUpdatePush(Star):
                 item_image = self._first_prefetched_item_image(item, image_map)
                 if item_image is None:
                     item_image = header_map.get(sec.appid)
+                    if item_image:
+                        item_image = self._scale_image(item_image, image_max_width, max_img_h)
+                else:
+                    item_image = self._scale_news_image(item_image, image_max_width)
                 if item_image:
-                    item_image = self._scale_image(item_image, image_max_width, max_img_h)
-                    blocks.append(RenderBlock("image", image=item_image, gap=10))
+                    blocks.append(RenderBlock("image", image=item_image, gap=10, align="center"))
             if is_free_games_sec:
                 for url in image_urls:
                     img = image_map.get(url)
@@ -3809,6 +3817,12 @@ class SteamUpdatePush(Star):
         ratio = min(max_w / img.width, max_h / img.height)
         new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
         return img.resize(new_size, PilImage.LANCZOS)
+
+    def _scale_news_image(self, img: PilImage.Image, max_w: int) -> PilImage.Image:
+        if img.width <= max_w:
+            return img
+        new_height = max(1, round(img.height * max_w / img.width))
+        return img.resize((max_w, new_height), PilImage.LANCZOS)
 
     def _format_time(self, ts: int) -> str:
         if not ts:

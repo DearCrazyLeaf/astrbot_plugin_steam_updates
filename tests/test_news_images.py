@@ -1,6 +1,12 @@
 import asyncio
+from io import BytesIO
+import sys
 import unittest
 import xml.etree.ElementTree as ET
+
+import PIL as RealPIL
+from PIL import Image as RealPilImage, ImageDraw as RealImageDraw, ImageFont as RealImageFont
+from PIL import ImageFile as RealImageFile, PngImagePlugin as RealPngImagePlugin
 
 from tests.test_free_games import _load_module
 
@@ -293,6 +299,7 @@ class NewsImageFallbackTest(unittest.TestCase):
         plugin._summarize_text = lambda text, max_chars: text
         plugin._format_time = lambda ts: ""
         plugin._scale_image = lambda image, max_w, max_h: image
+        plugin._scale_news_image = lambda image, max_w: image
         return plugin
 
     def test_each_announcement_uses_its_image_or_fixed_fallback(self):
@@ -355,6 +362,101 @@ class NewsImageFallbackTest(unittest.TestCase):
             [block.image for block in blocks if block.kind == "image"],
             [image_a, fixed_image, fixed_image],
         )
+        self.assertEqual(
+            [block.align for block in blocks if block.kind == "image"],
+            ["center", "center", "center"],
+        )
+
+
+class NewsImageLayoutTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_module()
+        cls.mod.PilImage = RealPilImage
+        cls.mod.ImageDraw = RealImageDraw
+        cls.mod.ImageFont = RealImageFont
+        sys.modules["PIL"] = RealPIL
+        sys.modules["PIL.Image"] = RealPilImage
+        sys.modules["PIL.ImageDraw"] = RealImageDraw
+        sys.modules["PIL.ImageFont"] = RealImageFont
+        sys.modules["PIL.ImageFile"] = RealImageFile
+        sys.modules["PIL.PngImagePlugin"] = RealPngImagePlugin
+
+    def _make_plugin(self):
+        return object.__new__(self.mod.SteamUpdatePush)
+
+    def test_news_image_scaling(self):
+        plugin = self._make_plugin()
+        fixtures = [
+            ((1600, 900), (796, 448)),
+            ((400, 1200), (400, 1200)),
+            ((796, 3000), (796, 3000)),
+        ]
+        corner_colors = {
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+        }
+
+        for source_size, expected_size in fixtures:
+            with self.subTest(source_size=source_size):
+                image = self.mod.PilImage.new("RGB", source_size, (0, 0, 0))
+                corner_draw = self.mod.ImageDraw.Draw(image)
+                corner_draw.rectangle((0, 0, 39, 39), fill=(255, 0, 0))
+                corner_draw.rectangle((source_size[0] - 40, 0, source_size[0] - 1, 39), fill=(0, 255, 0))
+                corner_draw.rectangle((0, source_size[1] - 40, 39, source_size[1] - 1), fill=(0, 0, 255))
+                corner_draw.rectangle((source_size[0] - 40, source_size[1] - 40, source_size[0] - 1, source_size[1] - 1), fill=(255, 255, 0))
+
+                scaled = plugin._scale_news_image(image, 796)
+
+                self.assertEqual(scaled.size, expected_size)
+                self.assertEqual(
+                    {
+                        scaled.getpixel((0, 0)),
+                        scaled.getpixel((scaled.width - 1, 0)),
+                        scaled.getpixel((0, scaled.height - 1)),
+                        scaled.getpixel((scaled.width - 1, scaled.height - 1)),
+                    },
+                    corner_colors,
+                )
+
+    def test_centered_image_block_uses_content_area(self):
+        plugin = self._make_plugin()
+        canvas = self.mod.PilImage.new("RGB", (900, 100), (0, 0, 0))
+        image = self.mod.PilImage.new("RGB", (400, 20), (255, 0, 0))
+        blocks = [self.mod.RenderBlock("image", image=image, align="center")]
+
+        plugin._draw_blocks(
+            canvas,
+            self.mod.ImageDraw.Draw(canvas),
+            blocks,
+            900,
+            52,
+            0,
+        )
+
+        self.assertEqual(canvas.getpixel((249, 0)), (0, 0, 0))
+        self.assertEqual(canvas.getpixel((250, 0)), (255, 0, 0))
+        self.assertEqual(canvas.getpixel((649, 0)), (255, 0, 0))
+        self.assertEqual(canvas.getpixel((650, 0)), (0, 0, 0))
+
+    def test_tall_news_image_contributes_its_full_height(self):
+        plugin = self._make_plugin()
+        image = self.mod.PilImage.new("RGB", (400, 1200), (255, 0, 0))
+        blocks = [self.mod.RenderBlock("image", image=image, gap=10, align="center")]
+
+        self.assertEqual(plugin._measure_blocks_height(blocks, 0), 1210)
+
+        plugin._load_font = lambda size, bold=False: self.mod.ImageFont.load_default()
+        plugin._build_card_blocks = lambda *args, **kwargs: blocks
+        plugin._draw_gradient = lambda *args, **kwargs: None
+        plugin._draw_card_header = lambda *args, **kwargs: (32, 36, 41)
+        plugin._draw_card_footer = lambda *args, **kwargs: None
+        rendered = plugin._render_card_sync([], "", "", "", {}, {})
+
+        with self.mod.PilImage.open(BytesIO(rendered)) as card:
+            self.assertEqual(card.size, (900, 1406))
 
 
 class _Font:
