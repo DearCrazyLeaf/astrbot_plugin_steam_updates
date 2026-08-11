@@ -587,6 +587,34 @@ class NewsImageLayoutTest(unittest.TestCase):
         self.assertEqual(canvas.getpixel((649, 0)), (255, 0, 0))
         self.assertEqual(canvas.getpixel((650, 0)), (0, 0, 0))
 
+    def test_image_top_gap_is_measured_and_drawn(self):
+        plugin = self._make_plugin()
+        canvas = self.mod.PilImage.new("RGB", (900, 500), (0, 0, 0))
+        image = self.mod.PilImage.new("RGB", (400, 400), (255, 0, 0))
+        blocks = [
+            self.mod.RenderBlock(
+                "image",
+                image=image,
+                gap=10,
+                align="center",
+                top_gap=16,
+            )
+        ]
+
+        end_y = plugin._draw_blocks(
+            canvas,
+            self.mod.ImageDraw.Draw(canvas),
+            blocks,
+            900,
+            52,
+            0,
+        )
+
+        self.assertEqual(canvas.getpixel((250, 15)), (0, 0, 0))
+        self.assertEqual(canvas.getpixel((250, 16)), (255, 0, 0))
+        self.assertEqual(end_y, 426)
+        self.assertEqual(plugin._measure_blocks_height(blocks, 0), 426)
+
     def test_tall_news_image_contributes_its_full_height(self):
         plugin = self._make_plugin()
         image = self.mod.PilImage.new("RGB", (400, 1200), (255, 0, 0))
