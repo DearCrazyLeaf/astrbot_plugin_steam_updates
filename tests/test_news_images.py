@@ -469,6 +469,10 @@ class NewsImageFallbackTest(unittest.TestCase):
             [block.align for block in blocks if block.kind == "image"],
             ["center", "center", "center"],
         )
+        self.assertEqual(
+            [block.top_gap for block in blocks if block.kind == "image"],
+            [16, 16, 16],
+        )
 
     def test_unsafe_tall_announcement_image_uses_fixed_fallback(self):
         plugin = self._make_plugin()

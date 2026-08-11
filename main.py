@@ -53,6 +53,7 @@ MAX_NEWS_IMAGE_BYTES = 4_000_000
 MAX_NEWS_IMAGE_PIXELS = 3_500_000
 MAX_NEWS_IMAGE_CACHE_FILES = 400
 MAX_CARD_RENDER_PIXELS = 20_000_000
+NEWS_IMAGE_TOP_MARGIN = 16
 
 
 @dataclass
@@ -3402,7 +3403,15 @@ class SteamUpdatePush(Star):
                     if item_image:
                         item_image = self._scale_image(item_image, image_max_width, max_img_h)
                 if item_image:
-                    blocks.append(RenderBlock("image", image=item_image, gap=10, align="center"))
+                    blocks.append(
+                        RenderBlock(
+                            "image",
+                            image=item_image,
+                            gap=10,
+                            align="center",
+                            top_gap=NEWS_IMAGE_TOP_MARGIN,
+                        )
+                    )
             if is_free_games_sec:
                 for url in image_urls:
                     img = image_map.get(url)
