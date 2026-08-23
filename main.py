@@ -2929,6 +2929,24 @@ class SteamUpdatePush(Star):
             cleaned = cleaned.replace("```", "")
         return cleaned.strip()
 
+    @staticmethod
+    def _parse_llm_news_response(text: str) -> tuple[str, str] | None:
+        match = re.fullmatch(
+            r"\s*【标题】\s*\n(?P<title>.*?)\n【正文】\s*\n?(?P<body>.*)",
+            text,
+            flags=re.DOTALL,
+        )
+        if not match:
+            return None
+        title = match.group("title").strip()
+        if not title:
+            return None
+        return title, match.group("body").strip()
+
+    @staticmethod
+    def _title_contains_han_characters(title: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", title))
+
     # --- message build ---
     async def _build_sections_native(
         self,
@@ -2973,10 +2991,33 @@ class SteamUpdatePush(Star):
                     "content": raw_input,
                 },
             )
+            prompt = (
+                f"{prompt.rstrip()}\n\n"
+                "【输出格式】\n"
+                "请仅使用简体中文，严格按以下结构输出，不要输出其他内容：\n"
+                "【标题】\n"
+                "简体中文标题\n"
+                "【正文】\n"
+                "整理后的正文\n"
+                "原标题含有汉字时，标题必须逐字保留原标题。"
+            )
             llm_text = await self._call_llm(prompt, umo)
             if not llm_text:
                 sections.append(AppSection(appid=appid, title=title, updates=items))
                 continue
+            source_title = items[0].title or "更新内容"
+            parsed_response = self._parse_llm_news_response(llm_text)
+            if parsed_response:
+                parsed_title, parsed_contents = parsed_response
+                merged_title = (
+                    source_title
+                    if self._title_contains_han_characters(source_title)
+                    else parsed_title
+                )
+                merged_contents = parsed_contents
+            else:
+                merged_title = source_title
+                merged_contents = llm_text
             latest_ts = max((it.date for it in items if it.date), default=items[0].date)
             image_candidates: list[str] = []
             for item in items:
@@ -2986,9 +3027,9 @@ class SteamUpdatePush(Star):
             image_url = image_candidates[0] if image_candidates else ""
             merged = NewsItem(
                 gid=items[0].gid,
-                title=items[0].title or "更新内容",
+                title=merged_title,
                 url=items[0].url,
-                contents=llm_text,
+                contents=merged_contents,
                 date=latest_ts,
                 appid=items[0].appid,
                 image_url=image_url,
