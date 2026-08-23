@@ -2932,20 +2932,20 @@ class SteamUpdatePush(Star):
     @staticmethod
     def _parse_llm_news_response(text: str) -> tuple[str, str] | None:
         match = re.fullmatch(
-            r"\s*【标题】\s*\n(?P<title>.*?)\n【正文】\s*\n?(?P<body>.*)",
+            r"\s*【标题】[ \t]*\r?\n(?P<title>[^\r\n]*)\r?\n【正文】[ \t]*\r?\n?(?P<body>.*)",
             text,
             flags=re.DOTALL,
         )
         if not match:
             return None
         title = match.group("title").strip()
-        if not title:
+        if not title or not SteamUpdatePush._title_contains_han_characters(title):
             return None
         return title, match.group("body").strip()
 
     @staticmethod
     def _title_contains_han_characters(title: str) -> bool:
-        return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ebef\U00030000-\U000323af]", title))
+        return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ebef\U0002f800-\U0002fa1f\U00030000-\U000323af]", title))
 
     # --- message build ---
     async def _build_sections_native(
@@ -2980,6 +2980,7 @@ class SteamUpdatePush(Star):
             if not items:
                 sections.append(AppSection(appid=appid, title=title, updates=[]))
                 continue
+            source_title = items[0].title or "更新内容"
             raw_input = self._build_llm_input(title, appid, items)
             prompt = self._apply_prompt_template(
                 template,
@@ -2996,6 +2997,8 @@ class SteamUpdatePush(Star):
                 "【输出格式】\n"
                 "严格按以下结构输出，不要输出其他内容：\n"
                 "【标题】\n"
+                "单个返回标题必须为“第一条公告原标题”的简体中文译文\n"
+                f"第一条公告原标题：{source_title}\n"
                 "标题必须使用简体中文\n"
                 "【正文】\n"
                 "正文继续遵循前述提示词的语言与格式要求\n"
@@ -3005,7 +3008,6 @@ class SteamUpdatePush(Star):
             if not llm_text:
                 sections.append(AppSection(appid=appid, title=title, updates=items))
                 continue
-            source_title = items[0].title or "更新内容"
             parsed_response = self._parse_llm_news_response(llm_text)
             if parsed_response:
                 parsed_title, parsed_contents = parsed_response

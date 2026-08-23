@@ -59,14 +59,39 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         merged = sections[0].updates[0]
         self.assertEqual(merged.title, "Summer Update")
         self.assertEqual(merged.contents, response)
+
+    async def test_llm_english_structured_title_keeps_original_title_and_complete_response_as_body(self):
+        response = "【标题】\nSummer Update\n【正文】\nFixed multiplayer issues"
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(merged.title, "Summer Update")
+        self.assertEqual(merged.contents, response)
+
+    async def test_llm_multiline_structured_title_keeps_original_title_and_complete_response_as_body(self):
+        response = "【标题】\n夏季更新\n补充说明\n【正文】\n修复了崩溃问题"
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(merged.title, "Summer Update")
+        self.assertEqual(merged.contents, response)
+
     async def test_llm_protocol_limits_simplified_chinese_to_title(self):
         plugin = self._make_plugin("【标题】\nSummer update\n【正文】\nBody remains in English", "正文必须使用英文。{content}")
         items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
         await plugin._build_sections_llm(["123"], {"123": items}, None)
         self.assertEqual(len(plugin._llm_prompts), 1)
         prompt = plugin._llm_prompts[0]
+        self.assertIn("单个返回标题必须为“第一条公告原标题”的简体中文译文", prompt)
         self.assertIn("标题必须使用简体中文", prompt)
         self.assertIn("正文继续遵循前述提示词的语言与格式要求", prompt)
+        self.assertIn("第一条公告原标题：Summer Update", prompt)
         self.assertNotIn("请仅使用简体中文", prompt)
 
     async def test_llm_structured_response_preserves_extended_han_original_title(self):
@@ -74,6 +99,64 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         items = [self.mod.NewsItem("1", "𠮷野家 Update", "url-1", "source", 1, "123")]
         sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
         self.assertEqual(sections[0].updates[0].title, "𠮷野家 Update")
+
+    async def test_llm_structured_response_preserves_compatibility_supplement_han_original_title(self):
+        plugin = self._make_plugin("【标题】\n模型标题\n【正文】\n正文")
+        items = [self.mod.NewsItem("1", "丽 Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        self.assertEqual(sections[0].updates[0].title, "丽 Update")
+
+    async def test_llm_multi_notice_uses_first_title_and_preserves_merged_metadata(self):
+        plugin = self._make_plugin("【标题】\n首条公告译文\n【正文】\n合并后的正文")
+        items = [
+            self.mod.NewsItem(
+                "first-gid",
+                "First English Notice",
+                "https://example.test/first",
+                "first source",
+                100,
+                "123",
+                image_url="https://img.test/first-cover.jpg",
+                image_candidates=(
+                    "https://img.test/first-1.jpg",
+                    "https://img.test/shared.jpg",
+                ),
+            ),
+            self.mod.NewsItem(
+                "second-gid",
+                "后续公告",
+                "https://example.test/second",
+                "second source",
+                200,
+                "123",
+                image_url="https://img.test/second-cover.jpg",
+                image_candidates=(
+                    "https://img.test/shared.jpg",
+                    "https://img.test/second-1.jpg",
+                ),
+            ),
+        ]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(len(plugin._llm_prompts), 1)
+        self.assertEqual(merged.title, "首条公告译文")
+        self.assertEqual(merged.gid, "first-gid")
+        self.assertEqual(merged.url, "https://example.test/first")
+        self.assertEqual(merged.date, 200)
+        self.assertEqual(
+            merged.image_candidates,
+            (
+                "https://img.test/first-1.jpg",
+                "https://img.test/shared.jpg",
+                "https://img.test/first-cover.jpg",
+                "https://img.test/second-1.jpg",
+                "https://img.test/second-cover.jpg",
+            ),
+        )
 
 
     @staticmethod
