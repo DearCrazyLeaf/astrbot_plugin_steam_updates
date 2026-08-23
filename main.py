@@ -2945,7 +2945,7 @@ class SteamUpdatePush(Star):
 
     @staticmethod
     def _title_contains_han_characters(title: str) -> bool:
-        return bool(re.search(r"[\u4e00-\u9fff]", title))
+        return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ebef\U00030000-\U000323af]", title))
 
     # --- message build ---
     async def _build_sections_native(
@@ -2994,11 +2994,11 @@ class SteamUpdatePush(Star):
             prompt = (
                 f"{prompt.rstrip()}\n\n"
                 "【输出格式】\n"
-                "请仅使用简体中文，严格按以下结构输出，不要输出其他内容：\n"
+                "严格按以下结构输出，不要输出其他内容：\n"
                 "【标题】\n"
-                "简体中文标题\n"
+                "标题必须使用简体中文\n"
                 "【正文】\n"
-                "整理后的正文\n"
+                "正文继续遵循前述提示词的语言与格式要求\n"
                 "原标题含有汉字时，标题必须逐字保留原标题。"
             )
             llm_text = await self._call_llm(prompt, umo)

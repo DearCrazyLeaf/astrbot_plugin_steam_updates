@@ -8,11 +8,15 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
     def setUpClass(cls):
         cls.mod = _load_module()
 
-    def _make_plugin(self, llm_text):
+    def _make_plugin(self, llm_text, template="{content}"):
         plugin = object.__new__(self.mod.SteamUpdatePush)
         plugin._resolve_app_names = self._async_return({"123": "Game"})
-        plugin._cfg = lambda key, default=None: "{content}" if key == "llm_prompt" else default
-        plugin._call_llm = self._async_return(llm_text)
+        plugin._cfg = lambda key, default=None: template if key == "llm_prompt" else default
+        plugin._llm_prompts = []
+        async def call_llm(prompt, umo):
+            plugin._llm_prompts.append(prompt)
+            return llm_text
+        plugin._call_llm = call_llm
         return plugin
 
     async def test_llm_structured_response_uses_simplified_chinese_title_and_body(self):
@@ -55,6 +59,22 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         merged = sections[0].updates[0]
         self.assertEqual(merged.title, "Summer Update")
         self.assertEqual(merged.contents, response)
+    async def test_llm_protocol_limits_simplified_chinese_to_title(self):
+        plugin = self._make_plugin("【标题】\nSummer update\n【正文】\nBody remains in English", "正文必须使用英文。{content}")
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+        await plugin._build_sections_llm(["123"], {"123": items}, None)
+        self.assertEqual(len(plugin._llm_prompts), 1)
+        prompt = plugin._llm_prompts[0]
+        self.assertIn("标题必须使用简体中文", prompt)
+        self.assertIn("正文继续遵循前述提示词的语言与格式要求", prompt)
+        self.assertNotIn("请仅使用简体中文", prompt)
+
+    async def test_llm_structured_response_preserves_extended_han_original_title(self):
+        plugin = self._make_plugin("【标题】\n模型标题\n【正文】\n正文")
+        items = [self.mod.NewsItem("1", "𠮷野家 Update", "url-1", "source", 1, "123")]
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+        self.assertEqual(sections[0].updates[0].title, "𠮷野家 Update")
+
 
     @staticmethod
     def _async_return(value):
