@@ -2919,29 +2919,92 @@ class SteamUpdatePush(Star):
         except Exception:
             text = str(resp)
         text = self._clean_llm_output(text)
-        return text.strip() if text else None
+        return text if text else None
 
     def _clean_llm_output(self, text: str) -> str:
-        if not text:
-            return ""
-        cleaned = text.strip()
-        if "```" in cleaned:
-            cleaned = cleaned.replace("```", "")
-        return cleaned.strip()
+        return self._normalize_llm_news_response(text)
 
     @staticmethod
-    def _parse_llm_news_response(text: str) -> tuple[str, str] | None:
-        match = re.fullmatch(
-            r"\s*【标题】[ \t]*\r?\n(?P<title>[^\r\n]*)\r?\n【正文】[ \t]*\r?\n?(?P<body>.*)",
-            text,
-            flags=re.DOTALL,
+    def _normalize_llm_news_response(text: str) -> str:
+        if not text:
+            return ""
+        normalized = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+        lines = normalized.split("\n")
+        if (
+            len(lines) >= 2
+            and re.fullmatch(r"```(?:text|markdown|plain)?[ \t]*", lines[0])
+            and re.fullmatch(r"```[ \t]*", lines[-1])
+        ):
+            normalized = "\n".join(lines[1:-1]).strip()
+        return normalized
+
+    @staticmethod
+    def _llm_protocol_marker(line: str) -> tuple[str, str] | None:
+        match = re.match(
+            r"^[ \t]*【(?P<kind>标题|正文)】[ \t]*(?:(?:：|:)[ \t]*)?(?P<value>.*)$",
+            line,
         )
         if not match:
             return None
-        title = match.group("title").strip()
-        if not title or not SteamUpdatePush._title_contains_han_characters(title):
+        return match.group("kind"), match.group("value")
+
+    @staticmethod
+    def _llm_protocol_marker_present(line: str) -> bool:
+        return "【标题】" in line or "【正文】" in line
+
+    @staticmethod
+    def _sanitize_llm_protocol_lines(text: str) -> str:
+        normalized = SteamUpdatePush._normalize_llm_news_response(text)
+        lines = [
+            line
+            for line in normalized.split("\n")
+            if not SteamUpdatePush._llm_protocol_marker_present(line)
+        ]
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _parse_llm_news_response(text: str) -> tuple[str, str] | None:
+        normalized = SteamUpdatePush._normalize_llm_news_response(text)
+        if not normalized:
             return None
-        return title, match.group("body").strip()
+        lines = normalized.split("\n")
+        marker_counts = {
+            "标题": sum(line.count("【标题】") for line in lines),
+            "正文": sum(line.count("【正文】") for line in lines),
+        }
+        if marker_counts["标题"] != 1 or marker_counts["正文"] != 1:
+            return None
+        markers = [
+            (idx, marker[0], marker[1])
+            for idx, line in enumerate(lines)
+            if (marker := SteamUpdatePush._llm_protocol_marker(line)) is not None
+        ]
+        title_markers = [marker for marker in markers if marker[1] == "标题"]
+        body_markers = [marker for marker in markers if marker[1] == "正文"]
+        if len(title_markers) != 1 or len(body_markers) != 1:
+            return None
+        title_idx, _, inline_title = title_markers[0]
+        body_idx, _, inline_body = body_markers[0]
+        if title_idx >= body_idx:
+            return None
+
+        title = inline_title.strip()
+        if not title:
+            title_line_idx = title_idx + 1
+            while title_line_idx < body_idx and not lines[title_line_idx].strip():
+                title_line_idx += 1
+            if title_line_idx < body_idx:
+                title = lines[title_line_idx].strip()
+                if any(lines[idx].strip() for idx in range(title_line_idx + 1, body_idx)):
+                    return None
+        body_lines = []
+        if inline_body.strip():
+            body_lines.append(inline_body)
+        body_lines.extend(lines[body_idx + 1 :])
+        body = "\n".join(body_lines).strip()
+        if title and SteamUpdatePush._title_contains_han_characters(title):
+            return title, body
+        return "", body
 
     @staticmethod
     def _title_contains_han_characters(title: str) -> bool:
@@ -3009,17 +3072,20 @@ class SteamUpdatePush(Star):
                 sections.append(AppSection(appid=appid, title=title, updates=items))
                 continue
             parsed_response = self._parse_llm_news_response(llm_text)
-            if parsed_response:
+            if parsed_response is not None:
                 parsed_title, parsed_contents = parsed_response
                 merged_title = (
                     source_title
-                    if self._title_contains_han_characters(source_title)
+                    if parsed_title and self._title_contains_han_characters(source_title)
                     else parsed_title
                 )
                 merged_contents = parsed_contents
             else:
                 merged_title = source_title
                 merged_contents = llm_text
+                if any(self._llm_protocol_marker_present(line) for line in self._normalize_llm_news_response(llm_text).split("\n")):
+                    merged_title = ""
+                    merged_contents = self._sanitize_llm_protocol_lines(llm_text)
             latest_ts = max((it.date for it in items if it.date), default=items[0].date)
             image_candidates: list[str] = []
             for item in items:

@@ -49,7 +49,7 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(merged.title, "Summer Update")
         self.assertEqual(merged.contents, "未按结构返回的完整摘要")
 
-    async def test_llm_empty_structured_title_keeps_original_title_and_complete_response_as_body(self):
+    async def test_llm_empty_structured_title_omits_title_and_keeps_body(self):
         response = "【标题】\n \n【正文】\n修复了崩溃问题"
         plugin = self._make_plugin(response)
         items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
@@ -57,10 +57,10 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
 
         merged = sections[0].updates[0]
-        self.assertEqual(merged.title, "Summer Update")
-        self.assertEqual(merged.contents, response)
+        self.assertEqual(merged.title, "")
+        self.assertEqual(merged.contents, "修复了崩溃问题")
 
-    async def test_llm_english_structured_title_keeps_original_title_and_complete_response_as_body(self):
+    async def test_llm_english_structured_title_omits_title_and_keeps_body(self):
         response = "【标题】\nSummer Update\n【正文】\nFixed multiplayer issues"
         plugin = self._make_plugin(response)
         items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
@@ -68,10 +68,10 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
 
         merged = sections[0].updates[0]
-        self.assertEqual(merged.title, "Summer Update")
-        self.assertEqual(merged.contents, response)
+        self.assertEqual(merged.title, "")
+        self.assertEqual(merged.contents, "Fixed multiplayer issues")
 
-    async def test_llm_multiline_structured_title_keeps_original_title_and_complete_response_as_body(self):
+    async def test_llm_multiline_structured_title_omits_title_and_sanitizes_body(self):
         response = "【标题】\n夏季更新\n补充说明\n【正文】\n修复了崩溃问题"
         plugin = self._make_plugin(response)
         items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
@@ -79,8 +79,79 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
 
         merged = sections[0].updates[0]
-        self.assertEqual(merged.title, "Summer Update")
-        self.assertEqual(merged.contents, response)
+        self.assertEqual(merged.title, "")
+        self.assertEqual(merged.contents, "夏季更新\n补充说明\n修复了崩溃问题")
+
+    async def test_llm_structured_response_allows_blank_lines_and_same_line_values(self):
+        response = "\r\n  【标题】：夏季更新\r\n\r\n【正文】:  修复了多人模式问题\r\n  "
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(merged.title, "夏季更新")
+        self.assertEqual(merged.contents, "修复了多人模式问题")
+
+    async def test_llm_structured_response_accepts_supported_outer_markdown_fences(self):
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+        for language in ("", "text", "markdown", "plain"):
+            with self.subTest(language=language):
+                fence = "```" + language
+                response = f"\n{fence}\n【标题】\n夏季更新\n【正文】\n修复了多人模式问题\n```\n"
+                plugin = self._make_plugin(response)
+                sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+                merged = sections[0].updates[0]
+                self.assertEqual(merged.title, "夏季更新")
+                self.assertEqual(merged.contents, "修复了多人模式问题")
+
+    async def test_llm_structured_body_preserves_internal_newlines_and_indentation(self):
+        response = "【标题】\n夏季更新\n【正文】\n  第一行\n\n    第二行\n"
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        self.assertEqual(sections[0].updates[0].contents, "第一行\n\n    第二行")
+
+    async def test_llm_duplicate_markers_omit_title_and_remove_protocol_lines(self):
+        response = "【标题】\n夏季更新\n【标题】\n重复标题\n【正文】\n正文内容"
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(merged.title, "")
+        self.assertEqual(merged.contents, "夏季更新\n重复标题\n正文内容")
+        self.assertNotIn("【标题】", merged.contents)
+        self.assertNotIn("【正文】", merged.contents)
+
+    async def test_llm_reversed_markers_omit_title_and_remove_protocol_lines(self):
+        response = "【正文】\n正文内容\n【标题】\n夏季更新"
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(merged.title, "")
+        self.assertEqual(merged.contents, "正文内容\n夏季更新")
+        self.assertNotIn("【标题】", merged.contents)
+        self.assertNotIn("【正文】", merged.contents)
+
+    async def test_llm_structurally_valid_english_title_keeps_body_without_protocol_markers(self):
+        response = "【标题】Summer Update\n【正文】\nFixed multiplayer issues"
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(merged.title, "")
+        self.assertEqual(merged.contents, "Fixed multiplayer issues")
+        self.assertNotIn("【标题】", merged.contents)
+        self.assertNotIn("【正文】", merged.contents)
 
     async def test_llm_protocol_limits_simplified_chinese_to_title(self):
         plugin = self._make_plugin("【标题】\nSummer update\n【正文】\nBody remains in English", "正文必须使用英文。{content}")
