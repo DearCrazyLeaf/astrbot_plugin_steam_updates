@@ -115,7 +115,7 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sections[0].updates[0].contents, "第一行\n\n    第二行")
 
     async def test_llm_duplicate_markers_omit_title_and_remove_protocol_lines(self):
-        response = "【标题】\n夏季更新\n【标题】\n重复标题\n【正文】\n正文内容"
+        response = "【标题】\n夏季更新\n【标题】\n重复标题\n【正文】\n正文内容\n\n正文第二段"
         plugin = self._make_plugin(response)
         items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
 
@@ -123,7 +123,7 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
 
         merged = sections[0].updates[0]
         self.assertEqual(merged.title, "")
-        self.assertEqual(merged.contents, "夏季更新\n重复标题\n正文内容")
+        self.assertEqual(merged.contents, "夏季更新\n重复标题\n正文内容\n\n正文第二段")
         self.assertNotIn("【标题】", merged.contents)
         self.assertNotIn("【正文】", merged.contents)
 

@@ -2955,10 +2955,15 @@ class SteamUpdatePush(Star):
     @staticmethod
     def _sanitize_llm_protocol_lines(text: str) -> str:
         normalized = SteamUpdatePush._normalize_llm_news_response(text)
-        lines = [
-            line.replace("【标题】", "").replace("【正文】", "")
-            for line in normalized.split("\n")
-        ]
+        lines: list[str] = []
+        for line in normalized.split("\n"):
+            cleaned = line.replace("【标题】", "").replace("【正文】", "")
+            if (
+                SteamUpdatePush._llm_protocol_marker_present(line)
+                and not cleaned.replace("：", "").replace(":", "").strip()
+            ):
+                continue
+            lines.append(cleaned)
         return "\n".join(lines).strip()
 
     @staticmethod
