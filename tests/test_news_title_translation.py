@@ -153,6 +153,22 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("【标题】", merged.contents)
         self.assertNotIn("【正文】", merged.contents)
 
+    def test_text_message_omits_empty_announcement_title(self):
+        plugin = object.__new__(self.mod.SteamUpdatePush)
+        plugin._cfg = lambda key, default=None: default
+        plugin._summarize_text = lambda text, max_chars: text
+        plugin._format_time = lambda timestamp: "2026/08/27 12:00"
+        section = self.mod.AppSection(
+            "123",
+            "Game",
+            [self.mod.NewsItem("1", "", "url-1", "正文内容", 1, "123")],
+        )
+
+        text = plugin._build_text_message([section], "2026/08/27 12:00")
+
+        self.assertNotIn("- \n", text)
+        self.assertIn("正文内容", text)
+
     async def test_llm_protocol_limits_simplified_chinese_to_title(self):
         plugin = self._make_plugin("【标题】\nSummer update\n【正文】\nBody remains in English", "正文必须使用英文。{content}")
         items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]

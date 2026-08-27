@@ -3139,7 +3139,8 @@ class SteamUpdatePush(Star):
                 lines.append("")
                 continue
             for item in sec.updates:
-                lines.append(f"- {item.title}")
+                if item.title:
+                    lines.append(f"- {item.title}")
                 if is_free_games_sec:
                     summary = self._summarize_free_game_text(item.contents, max_chars)
                 else:
