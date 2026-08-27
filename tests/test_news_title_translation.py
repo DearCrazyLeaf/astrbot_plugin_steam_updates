@@ -127,6 +127,32 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("【标题】", merged.contents)
         self.assertNotIn("【正文】", merged.contents)
 
+    async def test_llm_same_line_title_and_body_markers_remove_both_markers(self):
+        response = "【标题】夏季更新【正文】正文内容"
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(merged.title, "")
+        self.assertEqual(merged.contents, "夏季更新正文内容")
+        self.assertNotIn("【标题】", merged.contents)
+        self.assertNotIn("【正文】", merged.contents)
+
+    async def test_llm_same_line_duplicate_title_markers_remove_both_markers(self):
+        response = "【标题】夏季更新【标题】重复标题"
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(merged.title, "")
+        self.assertEqual(merged.contents, "夏季更新重复标题")
+        self.assertNotIn("【标题】", merged.contents)
+        self.assertNotIn("【正文】", merged.contents)
+
     async def test_llm_reversed_markers_omit_title_and_remove_protocol_lines(self):
         response = "【正文】\n正文内容\n【标题】\n夏季更新"
         plugin = self._make_plugin(response)
