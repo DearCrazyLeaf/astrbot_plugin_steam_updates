@@ -2955,11 +2955,16 @@ class SteamUpdatePush(Star):
     @staticmethod
     def _sanitize_llm_protocol_lines(text: str) -> str:
         normalized = SteamUpdatePush._normalize_llm_news_response(text)
-        lines = [
-            line
-            for line in normalized.split("\n")
-            if not SteamUpdatePush._llm_protocol_marker_present(line)
-        ]
+        lines: list[str] = []
+        for line in normalized.split("\n"):
+            marker = SteamUpdatePush._llm_protocol_marker(line)
+            if marker is not None:
+                if marker[1]:
+                    lines.append(marker[1])
+                continue
+            if SteamUpdatePush._llm_protocol_marker_present(line):
+                line = line.replace("【标题】", "").replace("【正文】", "")
+            lines.append(line)
         return "\n".join(lines).strip()
 
     @staticmethod
@@ -2989,14 +2994,15 @@ class SteamUpdatePush(Star):
             return None
 
         title = inline_title.strip()
-        if not title:
-            title_line_idx = title_idx + 1
-            while title_line_idx < body_idx and not lines[title_line_idx].strip():
-                title_line_idx += 1
-            if title_line_idx < body_idx:
-                title = lines[title_line_idx].strip()
-                if any(lines[idx].strip() for idx in range(title_line_idx + 1, body_idx)):
-                    return None
+        title_region = lines[title_idx + 1 : body_idx]
+        nonempty_title_lines = [line.strip() for line in title_region if line.strip()]
+        if title:
+            if nonempty_title_lines:
+                return None
+        elif nonempty_title_lines:
+            if len(nonempty_title_lines) > 1:
+                return None
+            title = nonempty_title_lines[0]
         body_lines = []
         if inline_body.strip():
             body_lines.append(inline_body)
@@ -3008,7 +3014,7 @@ class SteamUpdatePush(Star):
 
     @staticmethod
     def _title_contains_han_characters(title: str) -> bool:
-        return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ebef\U0002f800-\U0002fa1f\U00030000-\U000323af]", title))
+        return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ebef\U0002ebf0-\U0002ee5f\U0002f800-\U0002fa1f\U00030000-\U000323af\U000323b0-\U0003347f]", title))
 
     # --- message build ---
     async def _build_sections_native(

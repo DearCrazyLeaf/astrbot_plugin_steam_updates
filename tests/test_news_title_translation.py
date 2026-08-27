@@ -166,8 +166,37 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
 
         text = plugin._build_text_message([section], "2026/08/27 12:00")
 
-        self.assertNotIn("- \n", text)
+        self.assertNotRegex(text, r"(?m)^-[ \t]*$")
         self.assertIn("正文内容", text)
+
+    async def test_llm_inline_title_rejects_extra_nonempty_title_lines(self):
+        response = "【标题】夏季更新\n补充说明\n【正文】\n正文内容"
+        plugin = self._make_plugin(response)
+        items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        merged = sections[0].updates[0]
+        self.assertEqual(merged.title, "")
+        self.assertEqual(merged.contents, "夏季更新\n补充说明\n正文内容")
+        self.assertNotIn("【标题】", merged.contents)
+        self.assertNotIn("【正文】", merged.contents)
+
+    async def test_llm_structured_response_preserves_extension_i_han_original_title(self):
+        plugin = self._make_plugin("【标题】\n模型标题\n【正文】\n正文")
+        items = [self.mod.NewsItem("1", "\U0002ebf0 Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        self.assertEqual(sections[0].updates[0].title, "\U0002ebf0 Update")
+
+    async def test_llm_structured_response_preserves_extension_j_han_original_title(self):
+        plugin = self._make_plugin("【标题】\n模型标题\n【正文】\n正文")
+        items = [self.mod.NewsItem("1", "\U000323b0 Update", "url-1", "source", 1, "123")]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        self.assertEqual(sections[0].updates[0].title, "\U000323b0 Update")
 
     async def test_llm_protocol_limits_simplified_chinese_to_title(self):
         plugin = self._make_plugin("【标题】\nSummer update\n【正文】\nBody remains in English", "正文必须使用英文。{content}")
