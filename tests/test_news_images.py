@@ -1,12 +1,15 @@
 import asyncio
-from io import BytesIO
 import sys
 import unittest
 import xml.etree.ElementTree as ET
+from io import BytesIO
 
 import PIL as RealPIL
-from PIL import Image as RealPilImage, ImageDraw as RealImageDraw, ImageFont as RealImageFont
-from PIL import ImageFile as RealImageFile, PngImagePlugin as RealPngImagePlugin
+from PIL import Image as RealPilImage
+from PIL import ImageDraw as RealImageDraw
+from PIL import ImageFile as RealImageFile
+from PIL import ImageFont as RealImageFont
+from PIL import PngImagePlugin as RealPngImagePlugin
 
 from tests.test_free_games import _load_module
 
@@ -196,24 +199,41 @@ class NewsImageParsingTest(unittest.IsolatedAsyncioTestCase):
         first = "https://clan.fastly.steamstatic.com/images/100/first.png"
         second = "https://clan.fastly.steamstatic.com/images/100/second.png"
         plugin._request_with_network_fallback = self._async_return(
-            _Response(payload={"appnews": {"newsitems": [{
-                "gid": "1", "title": "Update", "url": "url-1",
-                "contents": f"[img]{first}[/img] [img]{second}[/img]", "date": 1,
-            }]}})
+            _Response(
+                payload={
+                    "appnews": {
+                        "newsitems": [
+                            {
+                                "gid": "1",
+                                "title": "Update",
+                                "url": "url-1",
+                                "contents": f"[img]{first}[/img] [img]{second}[/img]",
+                                "date": 1,
+                            }
+                        ]
+                    }
+                }
+            )
         )
         source = await plugin._fetch_news_api("123", 1)
         plugin._resolve_app_names = self._async_return({"123": "Game"})
-        plugin._cfg = lambda key, default=None: "{content}" if key == "llm_prompt" else default
+        plugin._cfg = lambda key, default=None: (
+            "{content}" if key == "llm_prompt" else default
+        )
         plugin._call_llm = self._async_return("Summary")
 
         sections = await plugin._build_sections_llm(["123"], {"123": source}, None)
 
-        self.assertEqual(plugin._item_image_candidates(sections[0].updates[0]), [first, second])
+        self.assertEqual(
+            plugin._item_image_candidates(sections[0].updates[0]), [first, second]
+        )
 
     async def test_llm_merge_keeps_first_source_image_reference(self):
         plugin = self._make_plugin()
         plugin._resolve_app_names = self._async_return({"123": "Game"})
-        plugin._cfg = lambda key, default=None: "{content}" if key == "llm_prompt" else default
+        plugin._cfg = lambda key, default=None: (
+            "{content}" if key == "llm_prompt" else default
+        )
         plugin._call_llm = self._async_return("Summary")
         items = [
             self.mod.NewsItem("1", "First", "url-1", "one", 1, "123"),
@@ -244,16 +264,28 @@ class NewsImageParsingTest(unittest.IsolatedAsyncioTestCase):
             "https://clan.fastly.steamstatic.com/images/100/d.png",
         ]
         plugin._resolve_app_names = self._async_return({"123": "Game"})
-        plugin._cfg = lambda key, default=None: "{content}" if key == "llm_prompt" else default
+        plugin._cfg = lambda key, default=None: (
+            "{content}" if key == "llm_prompt" else default
+        )
         plugin._call_llm = self._async_return("Summary")
         items = [
             self.mod.NewsItem(
-                "1", "First", "url-1", f"[img]{urls[0]}[/img] [img]{urls[1]}[/img]",
-                1, "123", urls[0],
+                "1",
+                "First",
+                "url-1",
+                f"[img]{urls[0]}[/img] [img]{urls[1]}[/img]",
+                1,
+                "123",
+                urls[0],
             ),
             self.mod.NewsItem(
-                "2", "Second", "url-2", f"[img]{urls[2]}[/img] [img]{urls[3]}[/img]",
-                2, "123", urls[2],
+                "2",
+                "Second",
+                "url-2",
+                f"[img]{urls[2]}[/img] [img]{urls[3]}[/img]",
+                2,
+                "123",
+                urls[2],
             ),
         ]
 
@@ -374,10 +406,22 @@ class NewsImageSelectionTest(unittest.IsolatedAsyncioTestCase):
                 "Game",
                 [
                     self.mod.NewsItem(
-                        "a", "Announcement A", "url-a", "body", 1, "100", shared_url,
+                        "a",
+                        "Announcement A",
+                        "url-a",
+                        "body",
+                        1,
+                        "100",
+                        shared_url,
                     ),
                     self.mod.NewsItem(
-                        "b", "Announcement B", "url-b", "body", 2, "100", shared_url,
+                        "b",
+                        "Announcement B",
+                        "url-b",
+                        "body",
+                        2,
+                        "100",
+                        shared_url,
                     ),
                 ],
             )
@@ -554,9 +598,21 @@ class NewsImageLayoutTest(unittest.TestCase):
                 image = self.mod.PilImage.new("RGB", source_size, (0, 0, 0))
                 corner_draw = self.mod.ImageDraw.Draw(image)
                 corner_draw.rectangle((0, 0, 39, 39), fill=(255, 0, 0))
-                corner_draw.rectangle((source_size[0] - 40, 0, source_size[0] - 1, 39), fill=(0, 255, 0))
-                corner_draw.rectangle((0, source_size[1] - 40, 39, source_size[1] - 1), fill=(0, 0, 255))
-                corner_draw.rectangle((source_size[0] - 40, source_size[1] - 40, source_size[0] - 1, source_size[1] - 1), fill=(255, 255, 0))
+                corner_draw.rectangle(
+                    (source_size[0] - 40, 0, source_size[0] - 1, 39), fill=(0, 255, 0)
+                )
+                corner_draw.rectangle(
+                    (0, source_size[1] - 40, 39, source_size[1] - 1), fill=(0, 0, 255)
+                )
+                corner_draw.rectangle(
+                    (
+                        source_size[0] - 40,
+                        source_size[1] - 40,
+                        source_size[0] - 1,
+                        source_size[1] - 1,
+                    ),
+                    fill=(255, 255, 0),
+                )
 
                 scaled = plugin._scale_news_image(image, 796)
 
