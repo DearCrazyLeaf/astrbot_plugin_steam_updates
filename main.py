@@ -3146,7 +3146,8 @@ class SteamUpdatePush(Star):
         card_kind: str = "game",
     ) -> bytes | None:
         t0 = time.perf_counter()
-        image_map = await self._prefetch_images(sections)
+        excluded_image_urls: set[str] = set()
+        image_map = await self._prefetch_images(sections, excluded_image_urls)
         t1 = time.perf_counter()
         if self._enable_app_headers():
             header_map = await self._prefetch_app_headers(sections)
@@ -3154,12 +3155,31 @@ class SteamUpdatePush(Star):
             header_map = {}
         t2 = time.perf_counter()
         loop = asyncio.get_running_loop()
-        rendered = await loop.run_in_executor(
-            None,
-            lambda: self._render_card_sync(
-                sections, publish_text, query_text, notice, image_map, header_map, card_kind
-            ),
-        )
+        while True:
+            rendered = await loop.run_in_executor(
+                None,
+                lambda: self._render_card_sync(
+                    sections, publish_text, query_text, notice, image_map, header_map, card_kind
+                ),
+            )
+            if rendered is not None:
+                break
+            selected_urls = self._selected_ordinary_image_urls(sections, image_map)
+            if not selected_urls:
+                break
+            rejected_url = max(
+                selected_urls,
+                key=lambda url: self._scaled_news_image_height(
+                    image_map[url], CARD_WIDTH - CARD_HORIZONTAL_PADDING * 2
+                ),
+            )
+            excluded_image_urls.add(rejected_url)
+            self._log_debug(
+                "render",
+                "retry card after image exceeded whole-card budget",
+                rejected_url=rejected_url,
+            )
+            image_map = await self._prefetch_images(sections, excluded_image_urls)
         t3 = time.perf_counter()
         self._log_debug(
             "render",
@@ -3727,6 +3747,24 @@ class SteamUpdatePush(Star):
                 return image_map[url]
         return None
 
+    def _selected_ordinary_image_urls(
+        self,
+        sections: list[AppSection],
+        image_map: dict[str, PilImage.Image],
+    ) -> list[str]:
+        selected: list[str] = []
+        for section in sections:
+            appid = str(section.appid).strip().lower()
+            if appid.startswith("workshop") or appid == "free_games":
+                continue
+            for item in section.updates:
+                for url in self._item_image_candidates(item):
+                    if url in image_map:
+                        if url not in selected:
+                            selected.append(url)
+                        break
+        return selected
+
     def _news_image_cache_path(self, url: str) -> Path:
         key = hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest()
         return self._news_image_dir / f"{key}.bin"
@@ -3827,9 +3865,14 @@ class SteamUpdatePush(Star):
             self._mark_fail_cooldown(self._image_fail_until, url)
             return None
 
-    async def _prefetch_images(self, sections: list[AppSection]) -> dict[str, PilImage.Image]:
+    async def _prefetch_images(
+        self,
+        sections: list[AppSection],
+        excluded_urls: set[str] | None = None,
+    ) -> dict[str, PilImage.Image]:
         if not self._client:
             return {}
+        excluded_urls = excluded_urls or set()
         ordinary_candidates: list[list[str]] = []
         special_urls: list[str] = []
         max_imgs = int(self._cfg("image_max_per_item", 1))
@@ -3866,6 +3909,8 @@ class SteamUpdatePush(Star):
 
         async def _fetch_first(candidates: list[str]):
             for url in candidates:
+                if url in excluded_urls:
+                    continue
                 img = await _fetch_url(url)
                 if img and self._news_image_fits_card_budget(
                     img, CARD_WIDTH - CARD_HORIZONTAL_PADDING * 2
@@ -3962,11 +4007,18 @@ class SteamUpdatePush(Star):
         return img.resize(new_size, PilImage.LANCZOS)
 
     @staticmethod
-    def _news_image_fits_card_budget(img: PilImage.Image, max_w: int) -> bool:
+    def _scaled_news_image_height(img: PilImage.Image, max_w: int) -> int:
         scaled_height = img.height
         if img.width > max_w:
             scaled_height = max(1, round(img.height * max_w / img.width))
-        return CARD_WIDTH * scaled_height <= MAX_CARD_RENDER_PIXELS
+        return scaled_height
+
+    @staticmethod
+    def _news_image_fits_card_budget(img: PilImage.Image, max_w: int) -> bool:
+        return (
+            CARD_WIDTH * SteamUpdatePush._scaled_news_image_height(img, max_w)
+            <= MAX_CARD_RENDER_PIXELS
+        )
 
     def _scale_news_image(self, img: PilImage.Image, max_w: int) -> PilImage.Image:
         if img.width <= max_w:

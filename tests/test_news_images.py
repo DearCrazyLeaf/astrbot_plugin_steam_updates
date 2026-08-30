@@ -3,6 +3,7 @@ import sys
 import unittest
 import xml.etree.ElementTree as ET
 from io import BytesIO
+from unittest import mock
 
 import PIL as RealPIL
 from PIL import Image as RealPilImage
@@ -12,6 +13,11 @@ from PIL import ImageFont as RealImageFont
 from PIL import PngImagePlugin as RealPngImagePlugin
 
 from tests.test_free_games import _load_module
+
+
+class _ImmediateExecutorLoop:
+    async def run_in_executor(self, executor, callback):
+        return callback()
 
 
 class _Response:
@@ -468,6 +474,59 @@ class NewsImageSelectionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {usable_url: usable_image})
         self.assertEqual(attempts, [too_tall_url, usable_url])
+
+    async def test_render_retries_next_candidate_when_whole_card_exceeds_budget(self):
+        too_tall_url = "https://clan.fastly.steamstatic.com/images/100/too-tall.png"
+        usable_url = "https://clan.fastly.steamstatic.com/images/100/usable.png"
+        too_tall_image = type("Image", (), {"width": 50, "height": 22_000})()
+        usable_image = type("Image", (), {"width": 400, "height": 200})()
+        attempts = []
+        rendered_maps = []
+
+        async def download(url):
+            attempts.append(url)
+            return too_tall_image if url == too_tall_url else usable_image
+
+        plugin = self._make_plugin()
+        plugin._download_image = download
+        plugin._enable_app_headers = lambda: False
+        plugin._log_debug = lambda *args, **kwargs: None
+        plugin._render_card_sync = lambda *args: (
+            rendered_maps.append(args[4])
+            or (None if too_tall_url in args[4] else b"rendered")
+        )
+        sections = [
+            self.mod.AppSection(
+                "100",
+                "Game",
+                [
+                    self.mod.NewsItem(
+                        "a",
+                        "Announcement A",
+                        "url-a",
+                        "body",
+                        1,
+                        "100",
+                        too_tall_url,
+                        (too_tall_url, usable_url),
+                    )
+                ],
+            )
+        ]
+
+        with mock.patch.object(
+            self.mod.asyncio,
+            "get_running_loop",
+            return_value=_ImmediateExecutorLoop(),
+        ):
+            result = await plugin._render_card(sections, "2026/08/30 12:00", "")
+
+        self.assertEqual(result, b"rendered")
+        self.assertEqual(attempts, [too_tall_url, usable_url])
+        self.assertEqual(
+            [set(image_map) for image_map in rendered_maps],
+            [{too_tall_url}, {usable_url}],
+        )
 
 
 class NewsImageFallbackTest(unittest.TestCase):
