@@ -37,6 +37,10 @@
 - **限时免费领取活动**：支持将当前仍可领取的 Steam 游戏作为独立分区“限时免费领取”并入游戏更新推送
 - **创意工坊订阅监控**：支持轮询 Workshop PublishedFileID，发现更新时间变化后推送，支持查询非公开创意工坊内容
 
+<img width="600" alt="中文标题、正文整理与公告原图实际效果" src="docs/images/news-title-translation-and-image.png" />
+
+<img width="600" alt="公告图片与限时免费领取分区实际效果" src="docs/images/news-image-and-free-game.png" />
+
 <img width="600" alt="free_games_preview" src="docs/images/free_games_preview.png" />
 
 <img width="900" height="1184" alt="preview" src="https://github.com/user-attachments/assets/59a296a5-23f8-428f-9a32-72e38f64289c" />
@@ -98,7 +102,7 @@ AstrBot WebUI -> 插件 -> 插件配置
 | max_days | 每个游戏最多展示最近 N 天更新 |
 | content_max_chars | 单游戏正文最大字符数 |
 | image_max_per_item | 每条更新最多渲染图片数（默认 1） |
-| image_max_height | 图片最大高度 |
+| image_max_height | 游戏头图、免费活动和创意工坊图片的最大高度；普通公告原图按比例和整卡像素预算处理 |
 | enable_app_headers | 是否启用游戏头图渲染 |
 | image_download_timeout_sec | 内容图片下载超时秒数 |
 | header_download_timeout_sec | 游戏头图下载超时秒数 |

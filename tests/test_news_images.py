@@ -324,8 +324,8 @@ class NewsImageSelectionTest(unittest.IsolatedAsyncioTestCase):
         a_second = "https://clan.fastly.steamstatic.com/images/100/a-second.png"
         b_first = "https://clan.fastly.steamstatic.com/images/200/b-first.png"
         b_second = "https://clan.fastly.steamstatic.com/images/200/b-second.png"
-        image_a = object()
-        image_b = object()
+        image_a = type("Image", (), {"width": 400, "height": 200})()
+        image_b = type("Image", (), {"width": 400, "height": 200})()
         attempts = []
         a_started = asyncio.Event()
         b_started = asyncio.Event()
@@ -391,7 +391,7 @@ class NewsImageSelectionTest(unittest.IsolatedAsyncioTestCase):
     async def test_prefetch_shares_one_download_task_for_duplicate_url(self):
         plugin = self._make_plugin()
         shared_url = "https://clan.fastly.steamstatic.com/images/100/shared.png"
-        shared_image = object()
+        shared_image = type("Image", (), {"width": 400, "height": 200})()
         attempts = []
 
         async def download(url):
@@ -431,6 +431,43 @@ class NewsImageSelectionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {shared_url: shared_image})
         self.assertEqual(attempts, [shared_url])
+
+    async def test_prefetch_skips_candidate_that_exceeds_card_budget(self):
+        too_tall_url = "https://clan.fastly.steamstatic.com/images/100/too-tall.png"
+        usable_url = "https://clan.fastly.steamstatic.com/images/100/usable.png"
+        too_tall_image = type("Image", (), {"width": 50, "height": 23_000})()
+        usable_image = type("Image", (), {"width": 400, "height": 200})()
+        attempts = []
+
+        async def download(url):
+            attempts.append(url)
+            return too_tall_image if url == too_tall_url else usable_image
+
+        plugin = self._make_plugin()
+        plugin._download_image = download
+        sections = [
+            self.mod.AppSection(
+                "100",
+                "Game",
+                [
+                    self.mod.NewsItem(
+                        "a",
+                        "Announcement A",
+                        "url-a",
+                        "body",
+                        1,
+                        "100",
+                        too_tall_url,
+                        (too_tall_url, usable_url),
+                    )
+                ],
+            )
+        ]
+
+        result = await plugin._prefetch_images(sections)
+
+        self.assertEqual(result, {usable_url: usable_image})
+        self.assertEqual(attempts, [too_tall_url, usable_url])
 
 
 class NewsImageFallbackTest(unittest.TestCase):

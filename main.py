@@ -54,6 +54,8 @@ MAX_NEWS_IMAGE_PIXELS = 3_500_000
 MAX_NEWS_IMAGE_CACHE_FILES = 400
 MAX_CARD_RENDER_PIXELS = 20_000_000
 NEWS_IMAGE_TOP_MARGIN = 16
+CARD_WIDTH = 900
+CARD_HORIZONTAL_PADDING = 52
 
 
 @dataclass
@@ -2932,21 +2934,15 @@ class SteamUpdatePush(Star):
         lines = normalized.split("\n")
         if (
             len(lines) >= 2
-            and re.fullmatch(r"```(?:text|markdown|plain)?[ \t]*", lines[0])
+            and re.fullmatch(r"```[^`]*", lines[0])
             and re.fullmatch(r"```[ \t]*", lines[-1])
         ):
             normalized = "\n".join(lines[1:-1]).strip()
         return normalized
 
     @staticmethod
-    def _llm_protocol_marker(line: str) -> tuple[str, str] | None:
-        match = re.match(
-            r"^[ \t]*【(?P<kind>标题|正文)】[ \t]*(?:(?:：|:)[ \t]*)?(?P<value>.*)$",
-            line,
-        )
-        if not match:
-            return None
-        return match.group("kind"), match.group("value")
+    def _strip_llm_protocol_value_prefix(text: str) -> str:
+        return re.sub(r"^[ \t]*(?:(?:：|:)[ \t]*)?", "", text, count=1)
 
     @staticmethod
     def _llm_protocol_marker_present(line: str) -> bool:
@@ -2971,42 +2967,22 @@ class SteamUpdatePush(Star):
         normalized = SteamUpdatePush._normalize_llm_news_response(text)
         if not normalized:
             return None
-        lines = normalized.split("\n")
-        marker_counts = {
-            "标题": sum(line.count("【标题】") for line in lines),
-            "正文": sum(line.count("【正文】") for line in lines),
-        }
-        if marker_counts["标题"] != 1 or marker_counts["正文"] != 1:
-            return None
-        markers = [
-            (idx, marker[0], marker[1])
-            for idx, line in enumerate(lines)
-            if (marker := SteamUpdatePush._llm_protocol_marker(line)) is not None
-        ]
-        title_markers = [marker for marker in markers if marker[1] == "标题"]
-        body_markers = [marker for marker in markers if marker[1] == "正文"]
-        if len(title_markers) != 1 or len(body_markers) != 1:
-            return None
-        title_idx, _, inline_title = title_markers[0]
-        body_idx, _, inline_body = body_markers[0]
-        if title_idx >= body_idx:
+        marker_pattern = re.compile(r"【(?P<kind>标题|正文)】")
+        markers = list(marker_pattern.finditer(normalized))
+        if [marker.group("kind") for marker in markers] != ["标题", "正文"]:
             return None
 
-        title = inline_title.strip()
-        title_region = lines[title_idx + 1 : body_idx]
-        nonempty_title_lines = [line.strip() for line in title_region if line.strip()]
-        if title:
-            if nonempty_title_lines:
-                return None
-        elif nonempty_title_lines:
-            if len(nonempty_title_lines) > 1:
-                return None
-            title = nonempty_title_lines[0]
-        body_lines = []
-        if inline_body.strip():
-            body_lines.append(inline_body)
-        body_lines.extend(lines[body_idx + 1 :])
-        body = "\n".join(body_lines).strip()
+        title_region = SteamUpdatePush._strip_llm_protocol_value_prefix(
+            normalized[markers[0].end() : markers[1].start()]
+        )
+        title_lines = [line.strip() for line in title_region.split("\n") if line.strip()]
+        if len(title_lines) > 1:
+            return None
+        title = title_lines[0] if title_lines else ""
+
+        body = SteamUpdatePush._strip_llm_protocol_value_prefix(
+            normalized[markers[1].end() :]
+        ).strip()
         if title and SteamUpdatePush._title_contains_han_characters(title):
             return title, body
         return "", body
@@ -3086,10 +3062,9 @@ class SteamUpdatePush(Star):
                 )
                 merged_contents = parsed_contents
             else:
-                merged_title = source_title
+                merged_title = ""
                 merged_contents = llm_text
                 if any(self._llm_protocol_marker_present(line) for line in self._normalize_llm_news_response(llm_text).split("\n")):
-                    merged_title = ""
                     merged_contents = self._sanitize_llm_protocol_lines(llm_text)
             latest_ts = max((it.date for it in items if it.date), default=items[0].date)
             image_candidates: list[str] = []
@@ -3305,8 +3280,8 @@ class SteamUpdatePush(Star):
         header_map: dict[str, PilImage.Image],
         card_kind: str = "game",
     ) -> bytes | None:
-        width = 900
-        padding = 52
+        width = CARD_WIDTH
+        padding = CARD_HORIZONTAL_PADDING
         header_h = 98
         max_text_width = width - padding * 2
         title_font = self._load_font(30, bold=True)
@@ -3892,7 +3867,9 @@ class SteamUpdatePush(Star):
         async def _fetch_first(candidates: list[str]):
             for url in candidates:
                 img = await _fetch_url(url)
-                if img:
+                if img and self._news_image_fits_card_budget(
+                    img, CARD_WIDTH - CARD_HORIZONTAL_PADDING * 2
+                ):
                     results[url] = img
                     return
 
@@ -3989,7 +3966,7 @@ class SteamUpdatePush(Star):
         scaled_height = img.height
         if img.width > max_w:
             scaled_height = max(1, round(img.height * max_w / img.width))
-        return 900 * scaled_height <= MAX_CARD_RENDER_PIXELS
+        return CARD_WIDTH * scaled_height <= MAX_CARD_RENDER_PIXELS
 
     def _scale_news_image(self, img: PilImage.Image, max_w: int) -> PilImage.Image:
         if img.width <= max_w:

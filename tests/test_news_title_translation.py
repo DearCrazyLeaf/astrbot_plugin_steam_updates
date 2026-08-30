@@ -45,16 +45,14 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(merged.title, "夏日 Update")
         self.assertEqual(merged.contents, "已修复问题")
 
-    async def test_llm_malformed_response_keeps_original_title_and_complete_response_as_body(
-        self,
-    ):
+    async def test_llm_unstructured_response_omits_title_and_keeps_complete_body(self):
         plugin = self._make_plugin("未按结构返回的完整摘要")
         items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
 
         sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
 
         merged = sections[0].updates[0]
-        self.assertEqual(merged.title, "Summer Update")
+        self.assertEqual(merged.title, "")
         self.assertEqual(merged.contents, "未按结构返回的完整摘要")
 
     async def test_llm_empty_structured_title_omits_title_and_keeps_body(self):
@@ -107,7 +105,7 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         items = [self.mod.NewsItem("1", "Summer Update", "url-1", "source", 1, "123")]
-        for language in ("", "text", "markdown", "plain"):
+        for language in ("", "text", "markdown", "plain", "json", "JSON"):
             with self.subTest(language=language):
                 fence = "```" + language
                 response = f"\n{fence}\n【标题】\n夏季更新\n【正文】\n修复了多人模式问题\n```\n"
@@ -153,8 +151,8 @@ class NewsTitleTranslationTest(unittest.IsolatedAsyncioTestCase):
         sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
 
         merged = sections[0].updates[0]
-        self.assertEqual(merged.title, "")
-        self.assertEqual(merged.contents, "夏季更新正文内容")
+        self.assertEqual(merged.title, "夏季更新")
+        self.assertEqual(merged.contents, "正文内容")
         self.assertNotIn("【标题】", merged.contents)
         self.assertNotIn("【正文】", merged.contents)
 
