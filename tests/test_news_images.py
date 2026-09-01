@@ -657,6 +657,47 @@ class NewsImageFallbackTest(unittest.TestCase):
             [fixed_image],
         )
 
+    def test_announcement_title_preserves_source_brackets_or_absence(self):
+        plugin = self._make_plugin()
+        plugin._wrap_blocks = lambda text, font, color, max_width: [
+            self.mod.RenderBlock("text", text, font, color)
+        ]
+        titles = (
+            "【新皮肤】欢快拳击妮琪预览",
+            "普通更新标题",
+            "[New Skin] Preview",
+        )
+
+        for title in titles:
+            with self.subTest(title=title):
+                section = self.mod.AppSection(
+                    "100",
+                    "Game",
+                    [self.mod.NewsItem("a", title, "", "", 0, "100")],
+                )
+
+                blocks = plugin._build_section_blocks(
+                    section,
+                    796,
+                    _Font(26),
+                    _Font(18),
+                    (220, 220, 220),
+                    _Font(14),
+                    (140, 140, 140),
+                    (100, 180, 255),
+                    {},
+                    796,
+                    320,
+                    1000,
+                    1,
+                    {},
+                )
+
+                self.assertIn(
+                    title,
+                    [block.text for block in blocks if block.kind == "text"],
+                )
+
 
 class NewsImageLayoutTest(unittest.TestCase):
     @classmethod

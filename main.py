@@ -3484,7 +3484,7 @@ class SteamUpdatePush(Star):
                 body_size = int(getattr(body_font, "size", 18))
                 news_title_size = max(body_size + 1, min(section_size - 2, body_size + 6))
                 news_title_font = self._load_font(news_title_size, bold=True)
-                news_title = str(item.title or "").strip().strip("[]").strip("\u3010\u3011")
+                news_title = str(item.title or "").strip()
                 if news_title:
                     title_blocks = self._wrap_blocks(news_title, news_title_font, title_color, max_text_width)
                     if title_blocks:
