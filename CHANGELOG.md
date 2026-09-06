@@ -2,8 +2,9 @@
 
 本文档记录 `astrbot_plugin_steam_updates` 的版本变更。
 
-## 未发布
+## v1.3.0
 
+[PR#7](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pull/7) by [Rhonin Wang](https://github.com/RhoninSeiei)
 ### 新增
 - Steam 游戏公告支持按正文顺序提取图片候选并展示首张有效图片，失败时继续尝试后续候选并回退游戏头图
 - 公告图片保持原始比例，不裁剪、不拉伸；窄图保持原始尺寸并水平居中，卡片高度按实际图片动态扩展
@@ -13,6 +14,9 @@
 - 兼容 GamerPower 在没有有效免费活动时返回字典响应，避免将正常空结果误判为抓取异常
 - LLM 响应兼容空行、Markdown 围栏、同行或重复协议标记以及全角/半角冒号
 - 无有效中文标题时省略公告标题并保留正文，防止 `【标题】`、`【正文】` 等协议标记进入卡片或文本
+
+<details>
+<summary>历史版本（点击展开）</summary>
 
 ## v1.2.10
 
@@ -36,22 +40,19 @@
 
 ## v1.2.8
 
+[PR#4](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pull/4) by [Rhonin Wang](https://github.com/RhoninSeiei)
 ### 优化
 - 优化游戏更新推送卡片的可读性与准确性
-[PR#4](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pull/4) by [Rhonin Wang](https://github.com/RhoninSeiei)
 
 ### 变更
 - 轮询推送时仅包含本周期内有更新的 AppID
 - 游戏更新卡片补充“公告/新闻标题”
 
-<details>
-<summary>历史版本（点击展开）</summary>
-
 ## v1.2.7
 
+[issues#2](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/issues/2);[PR#3](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pull/3) by [Rhonin Wang](https://github.com/RhoninSeiei)
 ### 修复
 - 添加去重机制，防止同一更新多次推送
-[issues#2](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/issues/2);[PR#3](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pull/3) by [Rhonin Wang](https://github.com/RhoninSeiei)
 
 ## v1.2.6
 
