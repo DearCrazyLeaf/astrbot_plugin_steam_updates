@@ -1,0 +1,859 @@
+import asyncio
+import sys
+import unittest
+import xml.etree.ElementTree as ET
+from io import BytesIO
+from unittest import mock
+
+import PIL as RealPIL
+from PIL import Image as RealPilImage
+from PIL import ImageDraw as RealImageDraw
+from PIL import ImageFile as RealImageFile
+from PIL import ImageFont as RealImageFont
+from PIL import PngImagePlugin as RealPngImagePlugin
+
+from tests.test_free_games import _load_module
+
+
+class _ImmediateExecutorLoop:
+    async def run_in_executor(self, executor, callback):
+        return callback()
+
+
+class _Response:
+    def __init__(self, *, text="", payload=None):
+        self.text = text
+        self._payload = payload or {}
+        self.status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class NewsImageParsingTest(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_module()
+
+    def _make_plugin(self):
+        plugin = object.__new__(self.mod.SteamUpdatePush)
+        plugin._steam_lang = lambda: "english"
+        plugin._cfg = lambda key, default=None: default
+        plugin._get_feed_timeout_sec = lambda: 10
+        plugin._log_warn = lambda *args, **kwargs: None
+        plugin._log_debug = lambda *args, **kwargs: None
+        plugin._debug = lambda *args, **kwargs: None
+        return plugin
+
+    def test_extracts_normalized_candidates_in_source_order_without_duplicates(self):
+        plugin = self._make_plugin()
+        text = (
+            "https://clan.fastly.steamstatic.com/images/4437469/banner.png "
+            "{STEAM_CLAN_IMAGE}/4437469/banner.png "
+            "{STEAM_CLAN_LOC_IMAGE}/3703047/localized.png "
+            "https://clan.fastly.steamstatic.com/images/4437469/banner.png"
+        )
+
+        self.assertEqual(
+            plugin._extract_news_image_candidates(text),
+            [
+                "https://clan.fastly.steamstatic.com/images/4437469/banner.png",
+                "https://clan.fastly.steamstatic.com/images/3703047/localized/english.png",
+                "https://clan.fastly.steamstatic.com/images/3703047/localized.png",
+            ],
+        )
+
+    def test_legacy_image_extractor_uses_normalized_candidates(self):
+        plugin = self._make_plugin()
+
+        self.assertEqual(
+            plugin._extract_image_urls("{STEAM_CLAN_IMAGE}/4437469/banner.png"),
+            ["https://clan.fastly.steamstatic.com/images/4437469/banner.png"],
+        )
+
+    def test_bbcode_image_tags_do_not_become_part_of_candidates(self):
+        plugin = self._make_plugin()
+        fixtures = [
+            (
+                "[img]{STEAM_CLAN_IMAGE}/4437469/banner.png[/img]",
+                ["https://clan.fastly.steamstatic.com/images/4437469/banner.png"],
+            ),
+            (
+                "[img]{STEAM_CLAN_LOC_IMAGE}/3703047/localized.png[/img]",
+                [
+                    "https://clan.fastly.steamstatic.com/images/3703047/localized/english.png",
+                    "https://clan.fastly.steamstatic.com/images/3703047/localized.png",
+                ],
+            ),
+            (
+                "[img]https://clan.fastly.steamstatic.com/images/4437469/banner.png[/img]",
+                ["https://clan.fastly.steamstatic.com/images/4437469/banner.png"],
+            ),
+        ]
+
+        for text, expected in fixtures:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    plugin._extract_news_image_candidates(text),
+                    expected,
+                )
+
+    async def test_api_item_keeps_first_normalized_candidate(self):
+        plugin = self._make_plugin()
+        plugin._request_with_network_fallback = self._async_return(
+            _Response(
+                payload={
+                    "appnews": {
+                        "newsitems": [
+                            {
+                                "gid": "1",
+                                "title": "Update",
+                                "url": "https://example.test/update",
+                                "contents": "{STEAM_CLAN_IMAGE}/4437469/banner.png",
+                                "date": 1,
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+
+        items = await plugin._fetch_news_api("123", 1)
+
+        self.assertEqual(
+            items[0].image_url,
+            "https://clan.fastly.steamstatic.com/images/4437469/banner.png",
+        )
+
+    def test_feed_candidate_prefers_escaped_img_before_enclosure(self):
+        plugin = self._make_plugin()
+        description = (
+            '&lt;p&gt;&lt;img src="https://clan.fastly.steamstatic.com/images/4437469/banner.png"&gt;'
+            "Patch notes&lt;/p&gt;"
+        )
+        item = ET.fromstring(
+            "<item>"
+            '<enclosure url="https://clan.fastly.steamstatic.com/images/3703047/localized.png" />'
+            "</item>"
+        )
+
+        self.assertEqual(
+            plugin._first_feed_image_url(item, description),
+            "https://clan.fastly.steamstatic.com/images/4437469/banner.png",
+        )
+
+    def test_feed_candidate_falls_back_to_enclosure(self):
+        plugin = self._make_plugin()
+        item = ET.fromstring(
+            "<item>"
+            '<enclosure url="https://clan.fastly.steamstatic.com/images/3703047/localized.png" />'
+            "</item>"
+        )
+
+        self.assertEqual(
+            plugin._first_feed_image_url(item, "Patch notes"),
+            "https://clan.fastly.steamstatic.com/images/3703047/localized.png",
+        )
+
+    async def test_feed_keeps_image_before_description_markup_is_removed(self):
+        plugin = self._make_plugin()
+        body = """<?xml version="1.0" encoding="UTF-8"?>
+<rss><channel><item>
+<title>Update</title>
+<link>https://steamcommunity.com/games/123/announcements/detail/1</link>
+<pubDate>Sat, 08 Aug 2026 00:00:00 +0000</pubDate>
+<description>&lt;p&gt;&lt;img src="https://clan.fastly.steamstatic.com/images/4437469/banner.png"&gt;Patch notes&lt;/p&gt;</description>
+</item></channel></rss>"""
+        plugin._request_with_network_fallback = self._async_return(_Response(text=body))
+
+        items = await plugin._fetch_news_feed("123", 1)
+
+        self.assertEqual(items[0].contents, "Patch notes")
+        self.assertEqual(
+            items[0].image_url,
+            "https://clan.fastly.steamstatic.com/images/4437469/banner.png",
+        )
+
+    async def test_feed_preserves_all_description_images_then_enclosure(self):
+        plugin = self._make_plugin()
+        first = "https://clan.fastly.steamstatic.com/images/100/first.png"
+        second = "https://clan.fastly.steamstatic.com/images/100/second.png"
+        enclosure = "https://clan.fastly.steamstatic.com/images/100/enclosure.png"
+        body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss><channel><item>
+<title>Update</title>
+<link>https://steamcommunity.com/games/123/announcements/detail/1</link>
+<pubDate>Sat, 08 Aug 2026 00:00:00 +0000</pubDate>
+<description>&lt;p&gt;&lt;img src="{first}"&gt;&lt;img src="{second}"&gt;Patch notes&lt;/p&gt;</description>
+<enclosure url="{enclosure}" />
+</item></channel></rss>"""
+        plugin._request_with_network_fallback = self._async_return(_Response(text=body))
+
+        items = await plugin._fetch_news_feed("123", 1)
+
+        self.assertIsInstance(getattr(items[0], "image_candidates", None), tuple)
+        self.assertEqual(
+            getattr(items[0], "image_candidates", ()),
+            (first, second, enclosure),
+        )
+
+    async def test_single_item_llm_summary_keeps_complete_source_chain(self):
+        plugin = self._make_plugin()
+        first = "https://clan.fastly.steamstatic.com/images/100/first.png"
+        second = "https://clan.fastly.steamstatic.com/images/100/second.png"
+        plugin._request_with_network_fallback = self._async_return(
+            _Response(
+                payload={
+                    "appnews": {
+                        "newsitems": [
+                            {
+                                "gid": "1",
+                                "title": "Update",
+                                "url": "url-1",
+                                "contents": f"[img]{first}[/img] [img]{second}[/img]",
+                                "date": 1,
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+        source = await plugin._fetch_news_api("123", 1)
+        plugin._resolve_app_names = self._async_return({"123": "Game"})
+        plugin._cfg = lambda key, default=None: (
+            "{content}" if key == "llm_prompt" else default
+        )
+        plugin._call_llm = self._async_return("Summary")
+
+        sections = await plugin._build_sections_llm(["123"], {"123": source}, None)
+
+        self.assertEqual(
+            plugin._item_image_candidates(sections[0].updates[0]), [first, second]
+        )
+
+    async def test_llm_merge_keeps_first_source_image_reference(self):
+        plugin = self._make_plugin()
+        plugin._resolve_app_names = self._async_return({"123": "Game"})
+        plugin._cfg = lambda key, default=None: (
+            "{content}" if key == "llm_prompt" else default
+        )
+        plugin._call_llm = self._async_return("Summary")
+        items = [
+            self.mod.NewsItem("1", "First", "url-1", "one", 1, "123"),
+            self.mod.NewsItem(
+                "2",
+                "Second",
+                "url-2",
+                "two",
+                2,
+                "123",
+                "https://clan.fastly.steamstatic.com/images/4437469/banner.png",
+            ),
+        ]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        self.assertEqual(
+            sections[0].updates[0].image_url,
+            "https://clan.fastly.steamstatic.com/images/4437469/banner.png",
+        )
+
+    async def test_merged_llm_summary_keeps_all_source_chains_in_order(self):
+        plugin = self._make_plugin()
+        urls = [
+            "https://clan.fastly.steamstatic.com/images/100/a.png",
+            "https://clan.fastly.steamstatic.com/images/100/b.png",
+            "https://clan.fastly.steamstatic.com/images/100/c.png",
+            "https://clan.fastly.steamstatic.com/images/100/d.png",
+        ]
+        plugin._resolve_app_names = self._async_return({"123": "Game"})
+        plugin._cfg = lambda key, default=None: (
+            "{content}" if key == "llm_prompt" else default
+        )
+        plugin._call_llm = self._async_return("Summary")
+        items = [
+            self.mod.NewsItem(
+                "1",
+                "First",
+                "url-1",
+                f"[img]{urls[0]}[/img] [img]{urls[1]}[/img]",
+                1,
+                "123",
+                urls[0],
+            ),
+            self.mod.NewsItem(
+                "2",
+                "Second",
+                "url-2",
+                f"[img]{urls[2]}[/img] [img]{urls[3]}[/img]",
+                2,
+                "123",
+                urls[2],
+            ),
+        ]
+
+        sections = await plugin._build_sections_llm(["123"], {"123": items}, None)
+
+        self.assertEqual(
+            plugin._item_image_candidates(sections[0].updates[0]),
+            urls,
+        )
+
+    @staticmethod
+    def _async_return(value):
+        async def _inner(*args, **kwargs):
+            return value
+
+        return _inner
+
+
+class NewsImageSelectionTest(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_module()
+
+    def _make_plugin(self):
+        plugin = object.__new__(self.mod.SteamUpdatePush)
+        plugin._client = object()
+        plugin._steam_lang = lambda: "english"
+        plugin._cfg = lambda key, default=None: default
+        plugin._prefetch_image_concurrency = lambda: 2
+        plugin._trim_news_image_cache = lambda: None
+        return plugin
+
+    async def test_prefetch_uses_first_successful_candidate_per_item(self):
+        plugin = self._make_plugin()
+        a_first = "https://clan.fastly.steamstatic.com/images/100/a-first.png"
+        a_second = "https://clan.fastly.steamstatic.com/images/100/a-second.png"
+        b_first = "https://clan.fastly.steamstatic.com/images/200/b-first.png"
+        b_second = "https://clan.fastly.steamstatic.com/images/200/b-second.png"
+        image_a = type("Image", (), {"width": 400, "height": 200})()
+        image_b = type("Image", (), {"width": 400, "height": 200})()
+        attempts = []
+        a_started = asyncio.Event()
+        b_started = asyncio.Event()
+        a_first_completed = False
+
+        async def download(url):
+            nonlocal a_first_completed
+            attempts.append(url)
+            if url == a_first:
+                a_started.set()
+                await asyncio.wait_for(b_started.wait(), timeout=1)
+                a_first_completed = True
+                return None
+            if url == a_second:
+                self.assertTrue(a_first_completed)
+                return image_a
+            if url == b_first:
+                b_started.set()
+                await asyncio.wait_for(a_started.wait(), timeout=1)
+                return image_b
+            self.fail(f"successful item requested another candidate: {url}")
+
+        plugin._download_image = download
+        sections = [
+            self.mod.AppSection(
+                "100",
+                "Game A",
+                [
+                    self.mod.NewsItem(
+                        "a",
+                        "Announcement A",
+                        "https://example.test/a",
+                        f"[img]{a_first}[/img] [img]{a_second}[/img]",
+                        1,
+                        "100",
+                        a_first,
+                    )
+                ],
+            ),
+            self.mod.AppSection(
+                "200",
+                "Game B",
+                [
+                    self.mod.NewsItem(
+                        "b",
+                        "Announcement B",
+                        "https://example.test/b",
+                        f"[img]{b_first}[/img] [img]{b_second}[/img]",
+                        2,
+                        "200",
+                        b_first,
+                    )
+                ],
+            ),
+        ]
+
+        result = await plugin._prefetch_images(sections)
+
+        self.assertEqual(result, {a_second: image_a, b_first: image_b})
+        self.assertLess(attempts.index(a_first), attempts.index(a_second))
+        self.assertNotIn(b_second, attempts)
+
+    async def test_prefetch_shares_one_download_task_for_duplicate_url(self):
+        plugin = self._make_plugin()
+        shared_url = "https://clan.fastly.steamstatic.com/images/100/shared.png"
+        shared_image = type("Image", (), {"width": 400, "height": 200})()
+        attempts = []
+
+        async def download(url):
+            attempts.append(url)
+            await asyncio.sleep(0)
+            return shared_image
+
+        plugin._download_image = download
+        sections = [
+            self.mod.AppSection(
+                "100",
+                "Game",
+                [
+                    self.mod.NewsItem(
+                        "a",
+                        "Announcement A",
+                        "url-a",
+                        "body",
+                        1,
+                        "100",
+                        shared_url,
+                    ),
+                    self.mod.NewsItem(
+                        "b",
+                        "Announcement B",
+                        "url-b",
+                        "body",
+                        2,
+                        "100",
+                        shared_url,
+                    ),
+                ],
+            )
+        ]
+
+        result = await plugin._prefetch_images(sections)
+
+        self.assertEqual(result, {shared_url: shared_image})
+        self.assertEqual(attempts, [shared_url])
+
+    async def test_prefetch_skips_candidate_that_exceeds_card_budget(self):
+        too_tall_url = "https://clan.fastly.steamstatic.com/images/100/too-tall.png"
+        usable_url = "https://clan.fastly.steamstatic.com/images/100/usable.png"
+        too_tall_image = type("Image", (), {"width": 50, "height": 23_000})()
+        usable_image = type("Image", (), {"width": 400, "height": 200})()
+        attempts = []
+
+        async def download(url):
+            attempts.append(url)
+            return too_tall_image if url == too_tall_url else usable_image
+
+        plugin = self._make_plugin()
+        plugin._download_image = download
+        sections = [
+            self.mod.AppSection(
+                "100",
+                "Game",
+                [
+                    self.mod.NewsItem(
+                        "a",
+                        "Announcement A",
+                        "url-a",
+                        "body",
+                        1,
+                        "100",
+                        too_tall_url,
+                        (too_tall_url, usable_url),
+                    )
+                ],
+            )
+        ]
+
+        result = await plugin._prefetch_images(sections)
+
+        self.assertEqual(result, {usable_url: usable_image})
+        self.assertEqual(attempts, [too_tall_url, usable_url])
+
+    async def test_render_retries_next_candidate_when_whole_card_exceeds_budget(self):
+        too_tall_url = "https://clan.fastly.steamstatic.com/images/100/too-tall.png"
+        usable_url = "https://clan.fastly.steamstatic.com/images/100/usable.png"
+        too_tall_image = type("Image", (), {"width": 50, "height": 22_000})()
+        usable_image = type("Image", (), {"width": 400, "height": 200})()
+        attempts = []
+        rendered_maps = []
+
+        async def download(url):
+            attempts.append(url)
+            return too_tall_image if url == too_tall_url else usable_image
+
+        plugin = self._make_plugin()
+        plugin._download_image = download
+        plugin._enable_app_headers = lambda: False
+        plugin._log_debug = lambda *args, **kwargs: None
+        plugin._render_card_sync = lambda *args: (
+            rendered_maps.append(args[4])
+            or (None if too_tall_url in args[4] else b"rendered")
+        )
+        sections = [
+            self.mod.AppSection(
+                "100",
+                "Game",
+                [
+                    self.mod.NewsItem(
+                        "a",
+                        "Announcement A",
+                        "url-a",
+                        "body",
+                        1,
+                        "100",
+                        too_tall_url,
+                        (too_tall_url, usable_url),
+                    )
+                ],
+            )
+        ]
+
+        with mock.patch.object(
+            self.mod.asyncio,
+            "get_running_loop",
+            return_value=_ImmediateExecutorLoop(),
+        ):
+            result = await plugin._render_card(sections, "2026/08/30 12:00", "")
+
+        self.assertEqual(result, b"rendered")
+        self.assertEqual(attempts, [too_tall_url, usable_url])
+        self.assertEqual(
+            [set(image_map) for image_map in rendered_maps],
+            [{too_tall_url}, {usable_url}],
+        )
+
+
+class NewsImageFallbackTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_module()
+
+    def _make_plugin(self):
+        plugin = object.__new__(self.mod.SteamUpdatePush)
+        plugin._steam_lang = lambda: "english"
+        plugin._load_font = lambda size, bold=False: _Font(size)
+        plugin._wrap_blocks = lambda *args, **kwargs: []
+        plugin._summarize_text = lambda text, max_chars: text
+        plugin._format_time = lambda ts: ""
+        plugin._scale_image = lambda image, max_w, max_h: image
+        plugin._scale_news_image = lambda image, max_w: image
+        return plugin
+
+    def test_each_announcement_uses_its_image_or_fixed_fallback(self):
+        plugin = self._make_plugin()
+        a_url = "https://clan.fastly.steamstatic.com/images/100/a.png"
+        b_url = "https://clan.fastly.steamstatic.com/images/100/b.png"
+        image_a = type("Image", (), {"width": 400, "height": 200})()
+        fixed_image = object()
+        section = self.mod.AppSection(
+            "100",
+            "Game",
+            [
+                self.mod.NewsItem(
+                    "a",
+                    "Announcement A",
+                    "",
+                    f"[img]{a_url}[/img]",
+                    0,
+                    "100",
+                    a_url,
+                ),
+                self.mod.NewsItem(
+                    "b",
+                    "Announcement B",
+                    "",
+                    f"[img]{b_url}[/img]",
+                    0,
+                    "100",
+                    b_url,
+                ),
+                self.mod.NewsItem(
+                    "c",
+                    "Announcement C",
+                    "",
+                    "No image",
+                    0,
+                    "100",
+                ),
+            ],
+        )
+
+        blocks = plugin._build_section_blocks(
+            section,
+            796,
+            _Font(26),
+            _Font(18),
+            (220, 220, 220),
+            _Font(14),
+            (140, 140, 140),
+            (100, 180, 255),
+            {a_url: image_a},
+            796,
+            320,
+            1000,
+            1,
+            {"100": fixed_image},
+        )
+
+        self.assertEqual(
+            [block.image for block in blocks if block.kind == "image"],
+            [image_a, fixed_image, fixed_image],
+        )
+        self.assertEqual(
+            [block.align for block in blocks if block.kind == "image"],
+            ["center", "center", "center"],
+        )
+        self.assertEqual(
+            [block.top_gap for block in blocks if block.kind == "image"],
+            [16, 16, 16],
+        )
+
+    def test_unsafe_tall_announcement_image_uses_fixed_fallback(self):
+        plugin = self._make_plugin()
+        image_url = "https://clan.fastly.steamstatic.com/images/100/tall.png"
+        unsafe_image = type("UnsafeImage", (), {"width": 1, "height": 3_500_000})()
+        fixed_image = object()
+        section = self.mod.AppSection(
+            "100",
+            "Game",
+            [
+                self.mod.NewsItem(
+                    "a",
+                    "Announcement A",
+                    "",
+                    "body",
+                    0,
+                    "100",
+                    image_url,
+                )
+            ],
+        )
+
+        blocks = plugin._build_section_blocks(
+            section,
+            796,
+            _Font(26),
+            _Font(18),
+            (220, 220, 220),
+            _Font(14),
+            (140, 140, 140),
+            (100, 180, 255),
+            {image_url: unsafe_image},
+            796,
+            320,
+            1000,
+            1,
+            {"100": fixed_image},
+        )
+
+        self.assertEqual(
+            [block.image for block in blocks if block.kind == "image"],
+            [fixed_image],
+        )
+
+    def test_announcement_title_preserves_source_brackets_or_absence(self):
+        plugin = self._make_plugin()
+        plugin._wrap_blocks = lambda text, font, color, max_width: [
+            self.mod.RenderBlock("text", text, font, color)
+        ]
+        titles = (
+            "【新皮肤】欢快拳击妮琪预览",
+            "普通更新标题",
+            "[New Skin] Preview",
+        )
+
+        for title in titles:
+            with self.subTest(title=title):
+                section = self.mod.AppSection(
+                    "100",
+                    "Game",
+                    [self.mod.NewsItem("a", title, "", "", 0, "100")],
+                )
+
+                blocks = plugin._build_section_blocks(
+                    section,
+                    796,
+                    _Font(26),
+                    _Font(18),
+                    (220, 220, 220),
+                    _Font(14),
+                    (140, 140, 140),
+                    (100, 180, 255),
+                    {},
+                    796,
+                    320,
+                    1000,
+                    1,
+                    {},
+                )
+
+                self.assertIn(
+                    title,
+                    [block.text for block in blocks if block.kind == "text"],
+                )
+
+
+class NewsImageLayoutTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_module()
+        cls.mod.PilImage = RealPilImage
+        cls.mod.ImageDraw = RealImageDraw
+        cls.mod.ImageFont = RealImageFont
+        sys.modules["PIL"] = RealPIL
+        sys.modules["PIL.Image"] = RealPilImage
+        sys.modules["PIL.ImageDraw"] = RealImageDraw
+        sys.modules["PIL.ImageFont"] = RealImageFont
+        sys.modules["PIL.ImageFile"] = RealImageFile
+        sys.modules["PIL.PngImagePlugin"] = RealPngImagePlugin
+
+    def _make_plugin(self):
+        return object.__new__(self.mod.SteamUpdatePush)
+
+    def test_news_image_scaling(self):
+        plugin = self._make_plugin()
+        fixtures = [
+            ((1600, 900), (796, 448)),
+            ((400, 1200), (400, 1200)),
+            ((796, 3000), (796, 3000)),
+        ]
+        corner_colors = {
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+        }
+
+        for source_size, expected_size in fixtures:
+            with self.subTest(source_size=source_size):
+                image = self.mod.PilImage.new("RGB", source_size, (0, 0, 0))
+                corner_draw = self.mod.ImageDraw.Draw(image)
+                corner_draw.rectangle((0, 0, 39, 39), fill=(255, 0, 0))
+                corner_draw.rectangle(
+                    (source_size[0] - 40, 0, source_size[0] - 1, 39), fill=(0, 255, 0)
+                )
+                corner_draw.rectangle(
+                    (0, source_size[1] - 40, 39, source_size[1] - 1), fill=(0, 0, 255)
+                )
+                corner_draw.rectangle(
+                    (
+                        source_size[0] - 40,
+                        source_size[1] - 40,
+                        source_size[0] - 1,
+                        source_size[1] - 1,
+                    ),
+                    fill=(255, 255, 0),
+                )
+
+                scaled = plugin._scale_news_image(image, 796)
+
+                self.assertEqual(scaled.size, expected_size)
+                self.assertEqual(
+                    {
+                        scaled.getpixel((0, 0)),
+                        scaled.getpixel((scaled.width - 1, 0)),
+                        scaled.getpixel((0, scaled.height - 1)),
+                        scaled.getpixel((scaled.width - 1, scaled.height - 1)),
+                    },
+                    corner_colors,
+                )
+
+    def test_centered_image_block_uses_content_area(self):
+        plugin = self._make_plugin()
+        canvas = self.mod.PilImage.new("RGB", (900, 100), (0, 0, 0))
+        image = self.mod.PilImage.new("RGB", (400, 20), (255, 0, 0))
+        blocks = [self.mod.RenderBlock("image", image=image, align="center")]
+
+        plugin._draw_blocks(
+            canvas,
+            self.mod.ImageDraw.Draw(canvas),
+            blocks,
+            900,
+            52,
+            0,
+        )
+
+        self.assertEqual(canvas.getpixel((249, 0)), (0, 0, 0))
+        self.assertEqual(canvas.getpixel((250, 0)), (255, 0, 0))
+        self.assertEqual(canvas.getpixel((649, 0)), (255, 0, 0))
+        self.assertEqual(canvas.getpixel((650, 0)), (0, 0, 0))
+
+    def test_image_top_gap_is_measured_and_drawn(self):
+        plugin = self._make_plugin()
+        canvas = self.mod.PilImage.new("RGB", (900, 500), (0, 0, 0))
+        image = self.mod.PilImage.new("RGB", (400, 400), (255, 0, 0))
+        blocks = [
+            self.mod.RenderBlock(
+                "image",
+                image=image,
+                gap=10,
+                align="center",
+                top_gap=16,
+            )
+        ]
+
+        end_y = plugin._draw_blocks(
+            canvas,
+            self.mod.ImageDraw.Draw(canvas),
+            blocks,
+            900,
+            52,
+            0,
+        )
+
+        self.assertEqual(canvas.getpixel((250, 15)), (0, 0, 0))
+        self.assertEqual(canvas.getpixel((250, 16)), (255, 0, 0))
+        self.assertEqual(end_y, 426)
+        self.assertEqual(plugin._measure_blocks_height(blocks, 0), 426)
+
+    def test_tall_news_image_contributes_its_full_height(self):
+        plugin = self._make_plugin()
+        image = self.mod.PilImage.new("RGB", (400, 1200), (255, 0, 0))
+        blocks = [self.mod.RenderBlock("image", image=image, gap=10, align="center")]
+
+        self.assertEqual(plugin._measure_blocks_height(blocks, 0), 1210)
+
+        plugin._load_font = lambda size, bold=False: self.mod.ImageFont.load_default()
+        plugin._build_card_blocks = lambda *args, **kwargs: blocks
+        plugin._draw_gradient = lambda *args, **kwargs: None
+        plugin._draw_card_header = lambda *args, **kwargs: (32, 36, 41)
+        plugin._draw_card_footer = lambda *args, **kwargs: None
+        rendered = plugin._render_card_sync([], "", "", "", {}, {})
+
+        with self.mod.PilImage.open(BytesIO(rendered)) as card:
+            self.assertEqual(card.size, (900, 1406))
+
+    def test_whole_card_over_render_budget_returns_none_before_allocation(self):
+        plugin = self._make_plugin()
+        oversized = type("OversizedImage", (), {"width": 1, "height": 22_100})()
+        blocks = [self.mod.RenderBlock("image", image=oversized)]
+        plugin._load_font = lambda size, bold=False: self.mod.ImageFont.load_default()
+        plugin._build_card_blocks = lambda *args, **kwargs: blocks
+
+        original_new = self.mod.PilImage.new
+
+        def guarded_new(mode, size, color=0):
+            if size[0] * size[1] > 20_000_000:
+                self.fail(f"oversized card allocation attempted: {size}")
+            return original_new(mode, size, color)
+
+        self.mod.PilImage.new = guarded_new
+        try:
+            self.assertIsNone(plugin._render_card_sync([], "", "", "", {}, {}))
+        finally:
+            self.mod.PilImage.new = original_new
+
+
+class _Font:
+    def __init__(self, size):
+        self.size = size
+
+
+if __name__ == "__main__":
+    unittest.main()

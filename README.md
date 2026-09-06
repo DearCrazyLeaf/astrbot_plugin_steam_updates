@@ -30,11 +30,16 @@
 - **多游戏**：支持多个 AppID 统一推送
 - **多平台推送**：支持使用 UMO 配置多个平台、多个同类型适配器实例、群聊、私聊和其他会话
 - **手动查询**：群内指令触发即时查询
-- **LLM整理**：可选用大模型对更新内容进行翻译/总结/排版
+- **LLM整理**：可选用大模型同时翻译公告标题并整理正文，不增加额外模型请求
+- **逐条公告配图**：优先显示每条公告正文中的首张有效图片，失败时自动尝试后续候选并回退游戏头图
 - **卡片/文本**：两种输出模式可选
 - **无更新静默**：当天无更新不推送
 - **限时免费领取活动**：支持将当前仍可领取的 Steam 游戏作为独立分区“限时免费领取”并入游戏更新推送
 - **创意工坊订阅监控**：支持轮询 Workshop PublishedFileID，发现更新时间变化后推送，支持查询非公开创意工坊内容
+
+<img width="600" alt="中文标题、正文整理与公告原图实际效果" src="docs/images/news-title-translation-and-image.png" />
+
+<img width="600" alt="公告图片与限时免费领取分区实际效果" src="docs/images/news-image-and-free-game.png" />
 
 <img width="600" alt="free_games_preview" src="docs/images/free_games_preview.png" />
 
@@ -96,8 +101,8 @@ AstrBot WebUI -> 插件 -> 插件配置
 | llm_prompt | LLM 提示词（仅 llm 模式生效） |
 | max_days | 每个游戏最多展示最近 N 天更新 |
 | content_max_chars | 单游戏正文最大字符数 |
-| image_max_per_item | 每条更新最多渲染图片数 |
-| image_max_height | 图片最大高度 |
+| image_max_per_item | 每条更新最多渲染图片数（默认 1） |
+| image_max_height | 游戏头图、免费活动和创意工坊图片的最大高度；普通公告原图按比例和整卡像素预算处理 |
 | enable_app_headers | 是否启用游戏头图渲染 |
 | image_download_timeout_sec | 内容图片下载超时秒数 |
 | header_download_timeout_sec | 游戏头图下载超时秒数 |
@@ -184,6 +189,8 @@ mixin:
 ### 📣 自动推送
 开启 enable_push 后，插件会自动轮询并向 notify_umos 与旧 notify_group_ids 的合并目标发送更新。新字段先处理，旧字段随后处理；规范 UMO 相同的目标只发送一次。
 若同时开启 `workshop_enable` 并配置 `workshop_item_ids`，会在同一轮询中检测创意工坊条目更新时间并合并推送
+游戏公告会按正文顺序提取图片候选并显示首张可用图片；图片保持原始比例，不裁剪、不拉伸，窄图保持原始尺寸并水平居中，全部候选失败时回退游戏头图
+使用 `llm` 内容处理模式时，同一次模型请求会同时返回中文公告标题和整理后的正文；解析器兼容空行、Markdown 围栏、同行标记及全角/半角冒号，并阻止协议标记进入最终卡片或文本
 若开启 `free_games_enable`，新的免费领取活动会在首次发现时主动推送一次；活动仍在领取期内时，只要同一轮存在普通游戏更新推送，就会作为独立分区“限时免费领取”附在游戏更新后面
 免费领取活动正文现在仅保留“截止时间”和“原价”
 免费领取活动在文本模式和卡片模式下均不会额外显示发布时间与链接

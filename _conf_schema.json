@@ -275,14 +275,15 @@
     "hint": "图片渲染长度、下载超时、并发与冷却",
     "items": {
       "image_max_per_item": {
-        "description": "每条更新最多渲染图片数",
+        "description": "每条更新显示一张图片",
         "type": "int",
-        "default": 10
+        "default": 1
       },
       "image_max_height": {
-        "description": "图片最大高度(px)",
+        "description": "非公告图片最大高度(px)",
         "type": "int",
-        "default": 320
+        "default": 320,
+        "hint": "用于游戏头图、免费活动和创意工坊图片；普通游戏公告原图按比例和整卡像素预算处理"
       },
       "enable_app_headers": {
         "description": "启用封面图渲染",
