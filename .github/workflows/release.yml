@@ -1,0 +1,79 @@
+name: Release Plugin
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Read version and changelog
+        id: metadata
+        shell: python
+        run: |
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          def read_version(revision=None):
+              command = ["git", "show", f"{revision or 'HEAD'}:metadata.yaml"]
+              content = subprocess.check_output(command, text=True, encoding="utf-8")
+              match = re.search(r"^version:\s*['\"]?([^'\"\s]+)", content, re.MULTILINE)
+              if not match:
+                  raise RuntimeError("Could not find version in metadata.yaml")
+              return match.group(1)
+
+          current_version = read_version()
+          try:
+              previous_version = read_version("HEAD^")
+          except subprocess.CalledProcessError:
+              previous_version = ""
+
+          output_path = Path(os.environ["GITHUB_OUTPUT"])
+          with output_path.open("a", encoding="utf-8") as output:
+              output.write(f"version={current_version}\n")
+              output.write(f"version_number={current_version.removeprefix('v')}\n")
+              output.write(f"changed={str(current_version != previous_version).lower()}\n")
+
+          if current_version != previous_version:
+              changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+              heading = re.compile(
+                  rf"^##\s+{re.escape(current_version)}\s*$", re.MULTILINE | re.IGNORECASE
+              )
+              match = heading.search(changelog)
+              if not match:
+                  raise RuntimeError(
+                      f"Could not find CHANGELOG.md section for {current_version}"
+                  )
+
+              section_start = match.end()
+              next_heading = re.search(r"^##\s+", changelog[section_start:], re.MULTILINE)
+              section_end = (
+                  section_start + next_heading.start()
+                  if next_heading
+                  else len(changelog)
+              )
+              body = changelog[section_start:section_end].strip()
+              if not body:
+                  raise RuntimeError(f"CHANGELOG.md section for {current_version} is empty")
+              Path("release-notes.md").write_text(body + "\n", encoding="utf-8")
+
+      - name: Create release
+        if: steps.metadata.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.metadata.outputs.version }}
+          name: Release V${{ steps.metadata.outputs.version_number }}
+          body_path: release-notes.md
+          generate_release_notes: false
