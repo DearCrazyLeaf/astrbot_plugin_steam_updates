@@ -1,0 +1,11 @@
+SteamUpdatesCJK Regular and SteamUpdatesCJK Bold are subset fonts derived
+from Source Han Sans CN Regular and Source Han Sans CN Bold, Version 2.005.
+
+Source Han Sans copyright 2014-2025 Adobe. The original Source Han Sans font
+software is distributed under the SIL Open Font License, Version 1.1; see
+OFL-1.1.txt in this directory.
+
+These derivative fonts retain the common simplified Chinese character set,
+plugin UI text, common Latin characters, CJK punctuation, fullwidth forms,
+and Japanese kana. The derived family was renamed to SteamUpdatesCJK because
+"Source" is a Reserved Font Name under the upstream license.

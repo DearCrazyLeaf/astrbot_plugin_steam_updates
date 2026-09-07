@@ -2,6 +2,13 @@
 
 本文档记录 `astrbot_plugin_steam_updates` 的版本变更。
 
+## v1.3.1
+
+### 变更
+- 更换专用字体文件以符合 AstrBot 插件大小限制
+- 字体构建自`Source Han Sans CN Regular and Source Han Sans CN Bold, Version 2.005.`，详情见`.font/FONT-NOTICE.txt`
+- 字体许可证`.font/OFL-1.1.txt`
+
 ## v1.3.0
 
 [PR#7](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pull/7) by [Rhonin Wang](https://github.com/RhoninSeiei)
