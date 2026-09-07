@@ -1,6 +1,6 @@
-# Steam Update Push (AstrBot Plugin)
+# ✨ Steam Update Push (AstrBot Plugin)
 
-### Steam 游戏/创意工坊更新推送（Steam News API）
+### ✨ Steam 游戏/创意工坊更新推送
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-v4.12%2B-brightgreen)
 ![License](https://img.shields.io/badge/License-GPL--3.0-orange)
@@ -11,12 +11,26 @@
 
 ## ✅ 简介 | Introduction
 
+<table>
+  <tr>
+    <td width="190" align="center">
+      <img width="170" alt="Steam Update Push logo" src="logo.png" style="border-radius: 24px;" />
+    </td>
+    <td>
+      <strong>Steam Update Push</strong><br />
+      Steam News · Workshop · Free Games<br />
+      <sub>Clear updates, delivered to your AstrBot conversations.</sub>
+    </td>
+  </tr>
+</table>
+
 这是一个为 **AstrBot** 编写的插件：轮询游戏/创意工坊更新并推送（支持多 AppID、创意工坊ID、卡片或文本）
 
 [![Release](https://img.shields.io/github/v/release/DearCrazyLeaf/astrbot_plugin_steam_updates?include_prereleases&color=blueviolet&label=最新版本)](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/releases/latest)
 [![License](https://img.shields.io/badge/许可证-GPL%203.0-orange)](https://www.gnu.org/licenses/gpl-3.0.txt)
 [![Issues](https://img.shields.io/github/issues/DearCrazyLeaf/astrbot_plugin_steam_updates?color=darkgreen&label=反馈)](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/issues)
 [![Pull Requests](https://img.shields.io/github/issues-pr/DearCrazyLeaf/astrbot_plugin_steam_updates?color=blue&label=请求)](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pulls)
+[![QQ Group](https://img.shields.io/badge/点击加入QQ群-12B7F5?logo=tencentqq&logoColor=white&label=问题反馈和建议)](https://qm.qq.com/q/H3uUCEZKgg)
 [![GitHub Stars](https://img.shields.io/github/stars/DearCrazyLeaf/astrbot_plugin_steam_updates?color=yellow&label=标星)](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/stargazers)
 
 > [!IMPORTANT]
@@ -25,6 +39,9 @@
 ---
 
 ## ✅ 功能列表 | Features
+
+> [!NOTE]
+> 特别感谢 [@RhoninSeiei](https://github.com/RhoninSeiei) 为本插件提供维护和优化！
 
 - **被动推送**：自动轮询 Steam 更新日志
 - **多游戏**：支持多个 AppID 统一推送
@@ -41,29 +58,33 @@
 
 <img width="600" alt="公告图片与限时免费领取分区实际效果" src="docs/images/news-image-and-free-game.png" />
 
-<img width="600" alt="free_games_preview" src="docs/images/free_games_preview.png" />
+<img width="600" alt="免费游戏实际效果" src="docs/images/free_games_preview.png" />
 
-<img width="900" height="1184" alt="preview" src="https://github.com/user-attachments/assets/59a296a5-23f8-428f-9a32-72e38f64289c" />
+<img width="600" alt="游戏更新实际效果" src="https://github.com/user-attachments/assets/59a296a5-23f8-428f-9a32-72e38f64289c" />
 
-<img width="900" height="847" alt="workshop_public_3240880604_v4_spacing" src="https://github.com/user-attachments/assets/74d16dc0-f15e-41e8-9d59-50b25dca6231" />
+<img width="600" alt="创意工坊实际效果" src="https://github.com/user-attachments/assets/74d16dc0-f15e-41e8-9d59-50b25dca6231" />
 
 ---
 
 ## 🔤 内置字体与许可 | Bundled Fonts and Licensing
 
-为了适配 AstrBot 插件的大小限制，本插件使用专用的精简字体文件：
+### 为了适配 AstrBot 插件的大小限制，本插件使用专用的精简字体文件
 
-- `font/SteamUpdatesCJK-Regular.ttf`：常规字重
-- `font/SteamUpdatesCJK-Bold.ttf`：粗体字重
+```
+  > font/SteamUpdatesCJK-Regular.ttf：常规字重
+  > font/SteamUpdatesCJK-Bold.ttf：粗体字重
+```
 
-这两个字体是基于 **Source Han Sans CN Regular** 和 **Source Han Sans CN Bold，Version 2.005** 构建的子集字体，保留插件界面所需的常用简体中文、拉丁字符、CJK 标点、全角字符和日文假名。由于 `Source` 是上游许可证中的保留字体名称，衍生字体已重命名为 `SteamUpdatesCJK`。
+- 这两个字体是基于 **Source Han Sans CN Regular** 和 **Source Han Sans CN Bold，Version 2.005** 构建的子集字体，保留插件界面所需的常用简体中文、拉丁字符、CJK 标点、全角字符和日文假名。由于 `Source` 是上游许可证中的保留字体名称，衍生字体已重命名为 `SteamUpdatesCJK`
 
-原始字体版权归 Adobe（2014-2025）所有，字体软件及其衍生字体依照 **SIL Open Font License 1.1** 发布。本插件随 `font/` 目录一并提供构建说明和完整许可证文本：
+- 原始字体版权归 Adobe（2014-2025）所有，字体软件及其衍生字体依照 **SIL Open Font License 1.1** 发布。本插件随 `font/` 目录一并提供构建说明和完整许可证文本：
 
-- `font/FONT-NOTICE.txt`：字体来源、子集内容和重命名说明
-- `font/OFL-1.1.txt`：SIL Open Font License 1.1 完整文本
+```
+  > font/FONT-NOTICE.txt：字体来源、子集内容和重命名说明
+  > font/OFL-1.1.txt：SIL Open Font 许可证 1.1
+```
 
-字体文件可以随本插件进行打包、嵌入和再分发，但字体软件本身必须继续遵循 OFL 1.1，且不得单独出售。插件代码本身仍遵循本项目的 GPL-3.0 许可；字体许可与插件代码许可相互独立。
+- 字体文件可以随本插件进行打包、嵌入和再分发，但字体软件本身必须继续遵循 OFL 1.1，且不得单独出售。插件代码本身仍遵循本项目的 GPL-3.0 许可；字体许可与插件代码许可相互独立
 
 ---
 
@@ -202,19 +223,29 @@ mixin:
 
 ---
 
-## 📌 使用方法 | Usage
+## 📌 使用说明 | Usage
 
 ### 📣 自动推送
-- 开启 `enable_push` 后，插件会自动轮询并向 `notify_umos` 与旧 `notify_group_ids` 的合并目标发送更新。新字段先处理，旧字段随后处理；规范 UMO 相同的目标只发送一次。
+- 开启 `enable_push` 后，插件会自动轮询并向 `notify_umos` 与旧 `notify_group_ids` 的合并目标发送更新。新字段先处理，旧字段随后处理；规范 UMO 相同的目标只发送一次
+
 - 若同时开启 `workshop_enable` 并配置 `workshop_item_ids`，会在同一轮询中检测创意工坊条目更新时间并合并推送
+
 - 游戏公告会按正文顺序提取图片候选并显示首张可用图片；图片保持原始比例，不裁剪、不拉伸，窄图保持原始尺寸并水平居中，全部候选失败时回退游戏头图
+
 - 使用 `llm` 内容处理模式时，同一次模型请求会同时返回中文公告标题和整理后的正文；解析器兼容空行、Markdown 围栏、同行标记及全角/半角冒号，并阻止协议标记进入最终卡片或文本
+
 - 若开启 `free_games_enable`，新的免费领取活动会在首次发现时主动推送一次；活动仍在领取期内时，只要同一轮存在普通游戏更新推送，就会作为独立分区“限时免费领取”附在游戏更新后面
+
 - 免费领取活动正文现在仅保留“截止时间”和“原价”
+
 - 免费领取活动在文本模式和卡片模式下均不会额外显示发布时间与链接
+
 - 即使某一轮免费领取活动正文仍混入旧版“领取方式”或“活动链接”，渲染阶段也会自动裁剪，只保留“截止时间”和“原价”
+
 - `display_timezone` 留空时跟随容器系统时区；填写 IANA 时区名时，活动源时间会先按 UTC 解释，再转换为目标时区显示截止时间
+
 - 免费领取活动数据来自 GamerPower 公开接口：`https://www.gamerpower.com/api/giveaways?platform=steam&type=game`
+
 - 该功能已经经过线上轮询与手动查询验证，可通过 `free_games_enable` 独立开启或关闭
 
 ### 🌐 UMO 推送目标（[@RhoninSeiei](https://github.com/RhoninSeiei)）
@@ -226,10 +257,10 @@ mixin:
 - 多个同类型适配器必须填写各自的平台实例 ID，例如：
 
 ```text
-qq-account-1:GroupMessage:123456
-qq-account-2:GroupMessage:123456
-telegram-main:FriendMessage:987654
-lark-main:OtherMessage:chat:thread:42
+  > qq-account-1:GroupMessage:123456
+  > qq-account-2:GroupMessage:123456
+  > telegram-main:FriendMessage:987654
+  > lark-main:OtherMessage:chat:thread:42
 ```
 
 - `notify_umos` 与 `notify_group_ids` 可以同时使用。`notify_umos` 中的目标优先；新旧目标规范化为 UMO 后保序去重。旧字段中的纯群号使用 `platform_id` 转换为 `GroupMessage` UMO，旧字段中已有的完整 UMO 继续按完整 UMO 解析。
@@ -241,33 +272,42 @@ lark-main:OtherMessage:chat:thread:42
 ### 💬 手动查询
 群内发送任一配置指令即可触发，例如：
 ```
-STEAM更新
-steam更新
-cs2更新
+  > STEAM更新
+  > steam更新
+  > cs2更新
 ```
-当没有普通游戏更新但存在仍可领取的免费游戏时，`free_games_manual_only_when_no_news` 默认为开启，此时仅返回“限时免费领取”分区
-如果将 `free_games_manual_only_when_no_news` 设为关闭，当天没有普通游戏更新时，命令会回退展示较早的游戏更新，并在该回退结果后附上“限时免费领取”分区
-如果未配置游戏 AppID 但仍启用 `free_games_enable`，手动查询会继续返回当前有效的“限时免费领取”分区
-免费领取活动标题优先显示接口原始名称；如果可解析到 Steam 官方中文名，则显示为 `原始标题（官方中文名）`
+- 当没有普通游戏更新但存在仍可领取的免费游戏时，`free_games_manual_only_when_no_news` 默认为开启，此时仅返回“限时免费领取”分区
+
+- 如果将 `free_games_manual_only_when_no_news` 设为关闭，当天没有普通游戏更新时，命令会回退展示较早的游戏更新，并在该回退结果后附上“限时免费领取”分区
+
+- 如果未配置游戏 AppID 但仍启用 `free_games_enable`，手动查询会继续返回当前有效的“限时免费领取”分区
+
+- 免费领取活动标题优先显示接口原始名称；如果可解析到 Steam 官方中文名，则显示为 `原始标题（官方中文名）`
 
 ### 🛰️ 平台捕获
+
+当不清楚当前会话的完整 UMO 时，可在群内发送：
+
 ```
-steam_update_ping
+  > steam_update_ping
 ```
-steam_update_ping 只为旧纯群号兼容模式捕获平台实例 ID 和 aiocqhttp bot。完整 UMO 使用自身的平台实例 ID，无需依赖该命令。
+
+> [!NOTE]
+> `steam_update_ping` 只为旧纯群号兼容模式捕获平台实例 ID 和 aiocqhttp bot
+> 完整 UMO 使用自身的平台实例 ID，无需依赖该命令
 
 ---
 
-## 🖼️ 输出模式 | Render Modes
+## ❤️ 贡献者 | contributors
 
-- `card`：图片卡片（推荐）
-- `text`：纯文本输出
+<a href="https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=DearCrazyLeaf/astrbot_plugin_steam_updates&max=300&columns=15" alt="Contributors" />
+</a>
 
----
 
-## 📜 License
+## 📜 许可证 | License
 
-GPL-3.0
+[![GPL-3.0 License](https://img.shields.io/badge/License-GPL--3.0-orange?style=for-the-badge)](https://www.gnu.org/licenses/gpl-3.0.txt)
 
 ---
 
