@@ -2,6 +2,12 @@
 
 本文档记录 `astrbot_plugin_steam_updates` 的版本变更。
 
+## v1.3.2
+
+### 变更
+- 更新 `README.md` 说明
+- 优化插件
+
 ## v1.3.1
 
 ### 变更
