@@ -6,8 +6,10 @@
 
 ### 变更
 - 更换专用字体文件以符合 AstrBot 插件大小限制
-- 字体构建自`Source Han Sans CN Regular and Source Han Sans CN Bold, Version 2.005.`，详情见`.font/FONT-NOTICE.txt`
-- 字体许可证`.font/OFL-1.1.txt`
+- 字体基于 `Source Han Sans CN Regular` 和 `Source Han Sans CN Bold, Version 2.005` 构建为 `SteamUpdatesCJK` 子集字体，并保留插件所需的中文、拉丁字符、CJK 标点、全角字符和日文假名
+- 由于 `Source` 是上游许可证中的保留字体名称，衍生字体重命名为 `SteamUpdatesCJK`
+- 字体来源与构建说明见 `font/FONT-NOTICE.txt`，完整字体许可证见 `font/OFL-1.1.txt`
+- README 新增内置字体来源、构建方式和独立许可说明
 
 ## v1.3.0
 
