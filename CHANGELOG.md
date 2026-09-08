@@ -2,6 +2,13 @@
 
 本文档记录 `astrbot_plugin_steam_updates` 的版本变更。
 
+## v1.3.3
+
+### 变更
+- 优化游戏新闻查询为并发模式，加快查询速度
+- 新增 `game_query_concurrency` 配置（轮询和手动查询共享并发上限）
+- AppID 查询保持配置顺序并去重，单个查询失败不会影响其他游戏
+
 ## v1.3.2
 
 ### 变更
@@ -17,6 +24,9 @@
 - 字体来源与构建说明见 `font/FONT-NOTICE.txt`，完整字体许可证见 `font/OFL-1.1.txt`
 - README 新增内置字体来源、构建方式和独立许可说明
 
+<details>
+<summary>历史版本（点击展开）</summary>
+
 ## v1.3.0
 
 [PR#7](https://github.com/DearCrazyLeaf/astrbot_plugin_steam_updates/pull/7) by [Rhonin Wang](https://github.com/RhoninSeiei)
@@ -29,9 +39,6 @@
 - 兼容 GamerPower 在没有有效免费活动时返回字典响应，避免将正常空结果误判为抓取异常
 - LLM 响应兼容空行、Markdown 围栏、同行或重复协议标记以及全角/半角冒号
 - 无有效中文标题时省略公告标题并保留正文，防止 `【标题】`、`【正文】` 等协议标记进入卡片或文本
-
-<details>
-<summary>历史版本（点击展开）</summary>
 
 ## v1.2.10
 

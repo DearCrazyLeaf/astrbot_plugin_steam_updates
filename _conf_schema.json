@@ -89,6 +89,12 @@
         "type": "int",
         "default": 10,
         "hint": "仅在启用回退时生效，建议范围 3-60"
+      },
+      "game_query_concurrency": {
+        "description": "游戏新闻最大并发查询数",
+        "type": "int",
+        "default": 4,
+        "hint": "同时查询多个游戏新闻的最大数量，建议范围 1-8"
       }
     }
   },

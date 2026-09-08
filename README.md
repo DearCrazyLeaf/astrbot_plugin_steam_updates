@@ -114,6 +114,7 @@ AstrBot WebUI -> 插件 -> 插件配置
 | steam_web_api_key | Steam Web API Key（可选） |
 | enable_feed_fallback | 是否启用 Steam Feed 回退 |
 | feed_timeout_sec | Feed 回退超时秒数 |
+| game_query_concurrency | 游戏新闻最大并发查询数，默认 `4`，范围 `1-8`；后台轮询和手动查询共享该上限 |
 | free_games_enable | 是否启用限时免费领取活动 |
 | free_games_manual_only_when_no_news | 手动查询在没有普通游戏更新时，是否仅返回“限时免费领取”分区 |
 | display_timezone | 免费领取截止时间显示时区；留空跟随容器系统时区，填写 IANA 时区名时按 UTC 活动源时间转换显示 |

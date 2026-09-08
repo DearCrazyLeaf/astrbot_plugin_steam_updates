@@ -129,6 +129,8 @@ class SteamUpdatePush(Star):
 
         self._client: httpx.AsyncClient | None = None
         self._client_signature: str = ""
+        self._news_query_semaphore: asyncio.Semaphore | None = None
+        self._news_query_semaphore_limit: int | None = None
         self._poll_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._last_platform_id: str | None = None
@@ -490,16 +492,21 @@ class SteamUpdatePush(Star):
 
     def _build_http_client(self) -> httpx.AsyncClient:
         timeout = httpx.Timeout(10.0)
+        query_concurrency = self._game_query_concurrency()
+        limits = httpx.Limits(
+            max_connections=max(16, query_concurrency * 2),
+            max_keepalive_connections=max(8, query_concurrency),
+        )
         mode = self._proxy_mode()
 
         if mode == "off":
             self._log_debug("network", "client init", proxy_mode=mode, trust_env=False)
-            return httpx.AsyncClient(timeout=timeout, trust_env=False)
+            return httpx.AsyncClient(timeout=timeout, limits=limits, trust_env=False)
 
         if mode == "system":
             # Use OS/container proxy env such as HTTP_PROXY / HTTPS_PROXY.
             self._log_debug("network", "client init", proxy_mode=mode, trust_env=True)
-            return httpx.AsyncClient(timeout=timeout, trust_env=True)
+            return httpx.AsyncClient(timeout=timeout, limits=limits, trust_env=True)
 
         proxy_url = self._proxy_url()
         if not proxy_url:
@@ -512,7 +519,12 @@ class SteamUpdatePush(Star):
         masked = self._mask_proxy_url(proxy_url)
         try:
             self._log_debug("network", "client init", proxy_mode=mode, proxy=masked)
-            return httpx.AsyncClient(timeout=timeout, proxy=proxy_url, trust_env=False)
+            return httpx.AsyncClient(
+                timeout=timeout,
+                limits=limits,
+                proxy=proxy_url,
+                trust_env=False,
+            )
         except Exception as exc:
             self._log_warn(
                 "network",
@@ -520,7 +532,7 @@ class SteamUpdatePush(Star):
                 proxy=masked,
                 error=exc,
             )
-            return httpx.AsyncClient(timeout=timeout, trust_env=False)
+            return httpx.AsyncClient(timeout=timeout, limits=limits, trust_env=False)
 
     def _http_client_signature(self) -> str:
         return f"{self._proxy_mode()}|{self._proxy_url()}"
@@ -583,7 +595,15 @@ class SteamUpdatePush(Star):
                 fallback=fallback_kind,
                 error=self._exc_text(exc),
             )
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), **fallback_kwargs) as client:
+            fallback_limits = httpx.Limits(
+                max_connections=max(16, self._game_query_concurrency() * 2),
+                max_keepalive_connections=max(8, self._game_query_concurrency()),
+            )
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0),
+                limits=fallback_limits,
+                **fallback_kwargs,
+            ) as client:
                 return await client.request(method, url, **kwargs)
 
     def _next_trace_id(self, prefix: str) -> str:
@@ -645,6 +665,26 @@ class SteamUpdatePush(Star):
         except Exception:
             timeout = 10
         return max(3, min(timeout, 60))
+
+    def _game_query_concurrency(self) -> int:
+        try:
+            value = int(self._cfg("game_query_concurrency", 4))
+        except Exception:
+            value = 4
+        return max(1, min(value, 8))
+
+    def _get_news_query_semaphore(self) -> asyncio.Semaphore:
+        limit = self._game_query_concurrency()
+        semaphore = getattr(self, "_news_query_semaphore", None)
+        semaphore_limit = getattr(self, "_news_query_semaphore_limit", None)
+        if (
+            semaphore is None
+            or semaphore_limit != limit
+        ):
+            semaphore = asyncio.Semaphore(limit)
+            self._news_query_semaphore = semaphore
+            self._news_query_semaphore_limit = limit
+        return semaphore
 
     def _workshop_enabled(self) -> bool:
         return bool(self._cfg("workshop_enable", False))
@@ -917,8 +957,14 @@ class SteamUpdatePush(Star):
         )
         updates_by_app: dict[str, list[NewsItem]] = {}
         app_state_updates: dict[str, str] = {}
+        fetched_updates = await self._fetch_news_for_appids(
+            appids,
+            fetch_count,
+            only_today=True,
+            trace=trace,
+        )
         for appid in appids:
-            items = await self._fetch_news(appid, fetch_count)
+            items = fetched_updates.get(appid, [])
             if not items:
                 self._log_debug("poll", "appid has no updates", trace=trace, appid=appid)
                 continue
@@ -1237,8 +1283,14 @@ class SteamUpdatePush(Star):
 
         updates_by_app: dict[str, list[NewsItem]] = {}
         if want_game:
+            fetched_updates = await self._fetch_news_for_appids(
+                appids,
+                fetch_count,
+                only_today=True,
+                trace=trace,
+            )
             for appid in appids:
-                items = await self._fetch_news(appid, fetch_count, only_today=True)
+                items = fetched_updates.get(appid, [])
                 if not items:
                     self._log_debug("manual", "today has no updates", trace=trace, appid=appid)
                     continue
@@ -1292,12 +1344,21 @@ class SteamUpdatePush(Star):
             else:
                 notice = "\u6ca1\u6709\u627e\u5230\u5f53\u5929\u7684\u66f4\u65b0\u4fe1\u606f\uff0c\u4ee5\u4e0b\u662f\u6700\u8fd1\u4e00\u6b21\u7684\u66f4\u65b0\u5185\u5bb9"
             if want_game:
+                fetched_updates = await self._fetch_news_for_appids(
+                    appids,
+                    fetch_count,
+                    only_today=False,
+                    trace=trace,
+                )
                 for appid in appids:
-                    items = await self._fetch_news(appid, fetch_count, only_today=False)
+                    items = self._filter_recent_days(
+                        fetched_updates.get(appid, []),
+                        max_days,
+                    )
                     if not items:
                         self._log_debug("manual", "fallback has no updates", trace=trace, appid=appid)
                         continue
-                    updates_by_app[appid] = self._filter_recent_days(items, max_days)
+                    updates_by_app[appid] = items
             if workshop_all:
                 # Workshop fallback keeps latest item of each subscribed ID.
                 workshop_updates = workshop_all
@@ -2661,12 +2722,79 @@ class SteamUpdatePush(Star):
 
     def _normalize_appids(self, raw_list: Any) -> list[str]:
         appids: list[str] = []
+        seen: set[str] = set()
         for item in raw_list or []:
             val = str(item).strip()
-            if not val:
+            if not val or val in seen:
                 continue
+            seen.add(val)
             appids.append(val)
         return appids
+
+    async def _fetch_news_for_appids(
+        self,
+        appids: list[str],
+        count: int,
+        *,
+        only_today: bool,
+        trace: str = "",
+    ) -> dict[str, list[NewsItem]]:
+        if not appids:
+            return {}
+
+        semaphore = self._get_news_query_semaphore()
+
+        async def fetch_one(appid: str) -> tuple[str, list[NewsItem]]:
+            started = time.perf_counter()
+            async with semaphore:
+                items = await self._fetch_news(
+                    appid,
+                    count,
+                    only_today=only_today,
+                )
+            self._log_debug(
+                "fetch",
+                "appid query finished",
+                trace=trace,
+                appid=appid,
+                item_count=len(items),
+                ms=int((time.perf_counter() - started) * 1000),
+                only_today=only_today,
+            )
+            return appid, items
+
+        results = await asyncio.gather(
+            *(fetch_one(appid) for appid in appids),
+            return_exceptions=True,
+        )
+        updates_by_app: dict[str, list[NewsItem]] = {}
+        error_count = 0
+        for appid, result in zip(appids, results):
+            if isinstance(result, BaseException):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                error_count += 1
+                self._log_warn(
+                    "fetch",
+                    "appid query failed",
+                    trace=trace,
+                    appid=appid,
+                    error_type=type(result).__name__,
+                )
+                continue
+            result_appid, items = result
+            updates_by_app[result_appid] = items
+        self._log_debug(
+            "fetch",
+            "appid query batch finished",
+            trace=trace,
+            app_count=len(appids),
+            concurrency=self._game_query_concurrency(),
+            result_count=len(updates_by_app),
+            error_count=error_count,
+            only_today=only_today,
+        )
+        return updates_by_app
 
     def _appid_map_path(self) -> Path:
         return Path(__file__).with_name("appid_map.json")
