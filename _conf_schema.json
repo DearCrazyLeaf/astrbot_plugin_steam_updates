@@ -95,6 +95,12 @@
         "type": "int",
         "default": 4,
         "hint": "同时查询多个游戏新闻的最大数量，建议范围 1-8"
+      },
+      "appdetails_retry_attempts": {
+        "description": "AppID 名称查询最大尝试次数",
+        "type": "int",
+        "default": 3,
+        "hint": "appdetails 查询失败后的最大尝试次数，范围 1-5，每次重试间隔 2 秒"
       }
     }
   },

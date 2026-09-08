@@ -136,8 +136,10 @@ class SteamUpdatePush(Star):
         self._last_platform_id: str | None = None
         self._last_bot: Any | None = None
         self._appid_name_map: dict[str, Any] | None = None
-        self._name_cache: dict[str, str] | None = None
+        self._name_cache: dict[str, Any] | None = None
         self._name_cache_path = self._data_dir / "app_name_cache.json"
+        self._app_name_inflight: dict[str, asyncio.Task[str]] = {}
+        self._name_cache_lock: asyncio.Lock | None = None
         self._trace_seq = 0
         self._image_fail_until: dict[str, float] = {}
         self._header_fail_until: dict[str, float] = {}
@@ -2825,19 +2827,156 @@ class SteamUpdatePush(Star):
         except Exception as exc:
             self._debug(f"save appid map failed: {exc}")
 
-    def _load_name_cache(self) -> dict[str, str]:
+    def _load_name_cache(self) -> dict[str, Any]:
         if self._name_cache is not None:
             return self._name_cache
         if self._name_cache_path.exists():
             try:
                 data = json.loads(self._name_cache_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    self._name_cache = {str(k): str(v) for k, v in data.items()}
+                    self._name_cache = {str(k): v for k, v in data.items()}
                     return self._name_cache
             except Exception as exc:
                 self._debug(f"load name cache failed: {exc}")
         self._name_cache = {}
         return self._name_cache
+
+    def _get_name_cache_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_name_cache_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._name_cache_lock = lock
+        return lock
+
+    @staticmethod
+    def _app_name_fallback(appid: str) -> str:
+        return f"AppID {appid}"
+
+    @staticmethod
+    def _name_cache_value(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            return str(value.get("value") or "").strip()
+        return ""
+
+    def _get_negative_name_cache_value(self, value: Any) -> str | None:
+        if not isinstance(value, dict) or value.get("status") != "retry_exhausted":
+            return None
+        try:
+            retry_after = float(value.get("retry_after", 0))
+        except (TypeError, ValueError):
+            return None
+        if retry_after > time.time():
+            return self._name_cache_value(value) or None
+        return None
+
+    def _appdetails_retry_attempts(self) -> int:
+        try:
+            value = int(self._cfg("appdetails_retry_attempts", 3))
+        except Exception:
+            value = 3
+        return max(1, min(value, 5))
+
+    @staticmethod
+    def _is_retryable_appdetails_status(status_code: int) -> bool:
+        return status_code == 429 or status_code >= 500
+
+    @classmethod
+    def _is_retryable_appdetails_exception(cls, exc: Exception) -> bool:
+        if isinstance(exc, (httpx.RequestError, httpx.TimeoutException, ValueError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            response = exc.response
+            return bool(response and cls._is_retryable_appdetails_status(response.status_code))
+        return False
+
+    async def _save_name_cache_value(self, cache_key: str, value: Any) -> None:
+        cache = self._load_name_cache()
+        async with self._get_name_cache_lock():
+            cache[cache_key] = value
+            self._save_name_cache()
+
+    async def _query_app_name_by_lang(self, appid: str, lang: str) -> str:
+        appid_map = self._load_appid_name_map()
+        cache_key = f"{appid}:{lang}"
+        attempts = self._appdetails_retry_attempts()
+        fallback = self._app_name_fallback(appid)
+
+        if not getattr(self, "_client", None):
+            return fallback
+
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = await self._request_with_network_fallback(
+                    "GET",
+                    "https://store.steampowered.com/api/appdetails",
+                    params={"appids": appid, "l": lang},
+                    timeout=10,
+                )
+                if self._is_retryable_appdetails_status(resp.status_code):
+                    resp.raise_for_status()
+                if 400 <= resp.status_code < 500:
+                    resp.raise_for_status()
+                    return fallback
+                resp.raise_for_status()
+                data = resp.json()
+                entry = data.get(str(appid)) or data.get(int(appid)) or {}
+                if not isinstance(entry, dict):
+                    raise ValueError("invalid appdetails entry")
+                if entry.get("success") is False:
+                    return fallback
+                if not entry.get("success") or not isinstance(entry.get("data"), dict):
+                    raise ValueError("incomplete appdetails response")
+                name = str(entry["data"].get("name", "")).strip()
+                if not name:
+                    return fallback
+
+                await self._save_name_cache_value(cache_key, name)
+                async with self._get_name_cache_lock():
+                    current = appid_map.get(str(appid))
+                    if isinstance(current, dict):
+                        current[str(lang)] = name
+                    elif current:
+                        current = {"default": str(current), str(lang): name}
+                    else:
+                        current = {str(lang): name}
+                    appid_map[str(appid)] = current
+                    self._save_appid_name_map()
+                return name
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not self._is_retryable_appdetails_exception(exc):
+                    self._log_debug(
+                        "appdetails",
+                        "non-retryable name query failure",
+                        appid=appid,
+                        error_type=type(exc).__name__,
+                    )
+                    return fallback
+                self._log_debug(
+                    "appdetails",
+                    "name query attempt failed",
+                    appid=appid,
+                    attempt=attempt,
+                    attempts=attempts,
+                    error_type=type(exc).__name__,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(2)
+
+        now = int(time.time())
+        await self._save_name_cache_value(
+            cache_key,
+            {
+                "value": fallback,
+                "status": "retry_exhausted",
+                "failed_at": now,
+                "retry_after": now + 600,
+            },
+        )
+        return fallback
 
     def _save_name_cache(self) -> None:
         if self._name_cache is None:
@@ -2866,6 +3005,10 @@ class SteamUpdatePush(Star):
 
     async def _get_app_name_by_lang(self, appid: str, lang: str) -> str:
         lang = str(lang or "schinese").strip().lower() or "schinese"
+        appid = str(appid or "").strip()
+        fallback = self._app_name_fallback(appid)
+        if not appid.isdigit():
+            return fallback
         appid_map = self._load_appid_name_map()
         mapped = self._pick_name_from_map(appid_map.get(str(appid)), lang)
         if mapped:
@@ -2874,43 +3017,28 @@ class SteamUpdatePush(Star):
         cache = self._load_name_cache()
         cache_key = f"{appid}:{lang}"
         if cache_key in cache:
-            return cache[cache_key]
+            cached_name = self._name_cache_value(cache[cache_key])
+            if isinstance(cache[cache_key], str) and cached_name:
+                return cached_name
+            negative_name = self._get_negative_name_cache_value(cache[cache_key])
+            if negative_name:
+                return negative_name
 
-        if not self._client:
-            return f"AppID {appid}"
+        inflight = getattr(self, "_app_name_inflight", None)
+        if inflight is None:
+            inflight = {}
+            self._app_name_inflight = inflight
+        existing = inflight.get(cache_key)
+        if existing is not None and not existing.done():
+            return await existing
 
+        task = asyncio.create_task(self._query_app_name_by_lang(appid, lang))
+        inflight[cache_key] = task
         try:
-            resp = await self._request_with_network_fallback(
-                "GET",
-                "https://store.steampowered.com/api/appdetails",
-                params={"appids": appid, "l": lang},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            entry = data.get(str(appid)) or data.get(int(appid)) or {}
-            if entry.get("success") and isinstance(entry.get("data"), dict):
-                name = str(entry["data"].get("name", "")).strip()
-                if name:
-                    cache[cache_key] = name
-                    self._save_name_cache()
-                    try:
-                        current = appid_map.get(str(appid))
-                        if isinstance(current, dict):
-                            current[str(lang)] = name
-                        elif current:
-                            current = {"default": str(current), str(lang): name}
-                        else:
-                            current = {str(lang): name}
-                        appid_map[str(appid)] = current
-                        self._save_appid_name_map()
-                    except Exception as exc:
-                        self._debug(f"update appid map failed: {exc}")
-                    return name
-        except Exception as exc:
-            self._debug(f"fetch app name failed ({appid}): {exc}")
-
-        return f"AppID {appid}"
+            return await task
+        finally:
+            if inflight.get(cache_key) is task:
+                inflight.pop(cache_key, None)
 
     async def _get_app_name(self, appid: str) -> str:
         lang = str(self._cfg("steam_lang", "schinese")).strip().lower() or "schinese"
