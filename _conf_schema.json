@@ -265,8 +265,8 @@
       "llm_timeout_sec": {
         "description": "LLM 请求超时(秒)",
         "type": "int",
-        "default": 20,
-        "hint": "建议范围 5-120，超时后回退到插件模式"
+        "default": 30,
+        "hint": "范围 5-30，超时后回退到插件模式"
       },
       "llm_prompt": {
         "description": "LLM 提示词",

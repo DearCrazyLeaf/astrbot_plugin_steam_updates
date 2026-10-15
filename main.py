@@ -720,10 +720,10 @@ class SteamUpdatePush(Star):
 
     def _llm_timeout_sec(self) -> int:
         try:
-            value = int(self._cfg("llm_timeout_sec", 20))
+            value = int(self._cfg("llm_timeout_sec", 30))
         except Exception:
-            value = 20
-        return max(5, min(value, 180))
+            value = 30
+        return max(5, min(value, 30))
 
     def _workshop_push_on_first_seen(self) -> bool:
         return bool(self._cfg("workshop_push_on_first_seen", False))
@@ -957,7 +957,7 @@ class SteamUpdatePush(Star):
             max_days=max_days,
             fetch_count=fetch_count,
         )
-        updates_by_app: dict[str, list[NewsItem]] = {}
+        recent_updates_by_app: dict[str, list[NewsItem]] = {}
         app_state_updates: dict[str, str] = {}
         fetched_updates = await self._fetch_news_for_appids(
             appids,
@@ -978,35 +978,48 @@ class SteamUpdatePush(Star):
 
             latest_gid = filtered_items[0].gid
             seen_key = self._news_seen_state_key(appid)
-            seen_gids = self._decode_news_seen_state(state.get(seen_key, ""))
-            legacy_gid = str(state.get(appid, "")).strip()
-
-            if seen_gids:
-                seen_set = set(seen_gids)
-                unseen_items = [item for item in filtered_items if item.gid not in seen_set]
-            elif legacy_gid:
-                boundary_idx = next((idx for idx, item in enumerate(filtered_items) if item.gid == legacy_gid), -1)
-                if boundary_idx >= 0:
-                    unseen_items = filtered_items[:boundary_idx]
-                else:
-                    unseen_items = [item for item in filtered_items if item.gid != legacy_gid]
-            else:
-                unseen_items = filtered_items
-
             app_state_updates[appid] = latest_gid
             app_state_updates[seen_key] = self._encode_news_seen_state(filtered_items)
+            recent_updates_by_app[appid] = filtered_items
 
-            if not unseen_items:
-                self._log_debug(
-                    "poll",
-                    "appid unchanged",
-                    trace=trace,
-                    appid=appid,
-                    gid=latest_gid,
+        state_before_target_migration = dict(state)
+        target_game_groups: dict[tuple[tuple[str, tuple[str, ...]], ...], dict[str, Any]] = {}
+        updates_by_app: dict[str, list[NewsItem]] = {}
+        for target in targets:
+            target_updates: dict[str, list[NewsItem]] = {}
+            for appid, items in recent_updates_by_app.items():
+                seen_set = self._target_news_seen_gids(
+                    state,
+                    target,
+                    appid,
+                    items,
                 )
-                continue
+                pending_items = [item for item in items if item.gid not in seen_set]
+                if pending_items:
+                    target_updates[appid] = pending_items
+                    existing = updates_by_app.get(appid, [])
+                    known = {item.gid for item in existing}
+                    updates_by_app[appid] = existing + [
+                        item for item in pending_items if item.gid not in known
+                    ]
 
-            updates_by_app[appid] = unseen_items
+            if target_updates:
+                signature = tuple(
+                    (appid, tuple(item.gid for item in items))
+                    for appid, items in target_updates.items()
+                )
+                group = target_game_groups.setdefault(
+                    signature,
+                    {"targets": [], "updates": target_updates},
+                )
+                group["targets"].append(target)
+
+        if not self._is_current_poll_instance():
+            self._log_warn("poll", "skip state update: stale poll instance", trace=trace)
+            return
+        # Persist migration baselines before a successful target advances the legacy snapshot.
+        if state != state_before_target_migration:
+            self._save_state(state)
 
         workshop_updates: list[NewsItem] = []
         workshop_state_updates: dict[str, str] = {}
@@ -1084,17 +1097,7 @@ class SteamUpdatePush(Star):
             return
 
         payload_batches: list[tuple[str, list[AppSection]]] = []
-        if updates_by_app:
-            updated_appids = [aid for aid in appids if aid in updates_by_app]
-            game_sections = await self._build_sections(updated_appids, updates_by_app) if updated_appids else []
-            merged_game_sections = self._merge_game_sections_with_free_games(
-                game_sections,
-                selected_free_game_items.attached_items,
-                free_only_when_no_news=True,
-            )
-            if merged_game_sections:
-                payload_batches.append(("game", merged_game_sections))
-        elif selected_free_game_items.standalone_items:
+        if not updates_by_app and selected_free_game_items.standalone_items:
             free_only_sections = self._merge_game_sections_with_free_games(
                 [],
                 selected_free_game_items.standalone_items,
@@ -1109,6 +1112,62 @@ class SteamUpdatePush(Star):
         query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
         mode = str(self._cfg("message_mode", "card")).lower()
         push_results: list[PushResult] = []
+
+        for group in target_game_groups.values():
+            group_targets = group["targets"]
+            group_updates = group["updates"]
+            updated_appids = [appid for appid in appids if appid in group_updates]
+            sections = await self._build_sections(
+                updated_appids,
+                group_updates,
+            )
+            sections = self._merge_game_sections_with_free_games(
+                sections,
+                selected_free_game_items.attached_items,
+                free_only_when_no_news=True,
+            )
+            if not sections:
+                continue
+            latest_ts = max(
+                (
+                    item.date
+                    for section in sections
+                    for item in section.updates
+                    if item.date
+                ),
+                default=int(datetime.now().timestamp()),
+            )
+            publish_text = datetime.fromtimestamp(latest_ts).strftime("%Y/%m/%d %H:%M")
+            result = await self._deliver_poll_payload(
+                group_targets,
+                sections,
+                publish_text,
+                query_text,
+                "game",
+                mode,
+            )
+            push_results.append(result)
+            if result.failed:
+                self._log_warn(
+                    "poll",
+                    "payload has failed targets",
+                    trace=trace,
+                    card_kind="game",
+                    failed_count=len(result.failed),
+                    succeeded_count=len(result.succeeded),
+                )
+            for target in result.succeeded:
+                for appid, delivered_items in group_updates.items():
+                    key = self._target_delivery_state_key(target, "news", appid)
+                    existing_gids = self._decode_news_seen_state(state.get(key, ""))
+                    delivered_gids = [item.gid for item in delivered_items]
+                    state[key] = self._encode_seen_gids(delivered_gids + existing_gids)
+            if result.succeeded:
+                if not self._is_current_poll_instance():
+                    self._log_warn("poll", "skip state update: stale poll instance", trace=trace)
+                    return
+                self._save_state(state)
+
         for card_kind, sections in payload_batches:
             latest_ts = max(
                 (
@@ -1563,12 +1622,50 @@ class SteamUpdatePush(Star):
     def _news_seen_state_key(appid: str) -> str:
         return f"news_seen:{appid}"
 
+    @classmethod
+    def _target_delivery_state_key(
+        cls,
+        target: NotifyTarget,
+        source: str,
+        item_id: str,
+    ) -> str:
+        return f"delivery:{cls._target_ref(target.umo)}:{source}:{item_id}"
+
+    def _target_news_seen_gids(
+        self,
+        state: dict[str, str],
+        target: NotifyTarget,
+        appid: str,
+        items: list[NewsItem],
+    ) -> set[str]:
+        key = self._target_delivery_state_key(target, "news", appid)
+        if key not in state:
+            legacy_seen = self._decode_news_seen_state(
+                state.get(self._news_seen_state_key(appid), "")
+            )
+            if not legacy_seen:
+                legacy_gid = str(state.get(appid, "")).strip()
+                boundary_idx = next(
+                    (idx for idx, item in enumerate(items) if item.gid == legacy_gid),
+                    -1,
+                )
+                if boundary_idx >= 0:
+                    legacy_seen = [item.gid for item in items[boundary_idx:]]
+                elif legacy_gid:
+                    legacy_seen = [legacy_gid]
+            state[key] = self._encode_seen_gids(legacy_seen)
+        return set(self._decode_news_seen_state(state.get(key, "")))
+
     def _news_seen_state_limit(self) -> int:
         try:
             limit = int(self._cfg("news_seen_state_limit", 120))
         except Exception:
             limit = 120
         return max(20, min(limit, 500))
+
+    def _encode_seen_gids(self, gids: list[str]) -> str:
+        unique_gids = list(dict.fromkeys(str(gid).strip() for gid in gids if str(gid).strip()))
+        return json.dumps(unique_gids[: self._news_seen_state_limit()], ensure_ascii=False)
 
     def _encode_news_seen_state(self, items: list[NewsItem]) -> str:
         gids: list[str] = []
@@ -2560,14 +2657,22 @@ class SteamUpdatePush(Star):
 
         items = data.get("appnews", {}).get("newsitems", []) or []
         results: list[NewsItem] = []
+        skipped_external = 0
         for item in items:
+            url = str(item.get("url", ""))
+            if self._is_external_news(
+                url,
+                bool(item.get("is_external_url", False)),
+            ):
+                skipped_external += 1
+                continue
             contents = str(item.get("contents", ""))
             image_candidates = self._extract_news_image_candidates(contents)
             results.append(
                 NewsItem(
                     gid=str(item.get("gid", "")),
                     title=str(item.get("title", "")),
-                    url=str(item.get("url", "")),
+                    url=url,
                     contents=contents,
                     date=int(item.get("date", 0)),
                     appid=str(appid),
@@ -2581,6 +2686,7 @@ class SteamUpdatePush(Star):
             appid=appid,
             status=resp.status_code,
             item_count=len(results),
+            skipped_external=skipped_external,
             has_key=has_key,
         )
         return results
@@ -2604,6 +2710,13 @@ class SteamUpdatePush(Star):
             return match.group(1)
         raw = f"{link}|{title}|{ts}"
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+
+    @staticmethod
+    def _is_external_news(url: str, is_external_url: bool = False) -> bool:
+        if is_external_url:
+            return True
+        path = urlparse(str(url or "")).path.lower().rstrip("/")
+        return "/news/externalpost/" in f"{path}/"
 
     @staticmethod
     def _parse_feed_pub_ts(pub_date: str) -> int:
@@ -2661,9 +2774,15 @@ class SteamUpdatePush(Star):
         items = root.findall(".//item")
         max_count = max(1, count)
         results: list[NewsItem] = []
-        for item in items[:max_count]:
+        skipped_external = 0
+        for item in items:
+            if len(results) >= max_count:
+                break
             title = (item.findtext("title") or "").strip()
             link = (item.findtext("link") or "").strip()
+            if self._is_external_news(link):
+                skipped_external += 1
+                continue
             pub_date = (item.findtext("pubDate") or "").strip()
             desc = (item.findtext("description") or "").strip()
             ts = self._parse_feed_pub_ts(pub_date)
@@ -2687,6 +2806,7 @@ class SteamUpdatePush(Star):
             appid=appid,
             status=resp.status_code,
             item_count=len(results),
+            skipped_external=skipped_external,
         )
         return results
 

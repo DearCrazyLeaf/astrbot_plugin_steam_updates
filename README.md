@@ -49,6 +49,7 @@
 - **手动查询**：群内指令触发即时查询
 - **LLM整理**：可选用大模型同时翻译公告标题并整理正文，不增加额外模型请求
 - **逐条公告配图**（[@RhoninSeiei](https://github.com/RhoninSeiei)）：优先显示每条公告正文中的首张有效图片，失败时自动尝试后续候选并回退游戏头图
+- **自动过滤已标记的外部文章**：排除 News API 标记为 `is_external_url` 的新闻，以及 Feed 链接路径含 `externalpost` 的文章
 - **卡片/文本**：两种输出模式可选
 - **无更新静默**：当天无更新不推送
 - **限时免费领取活动**（[@RhoninSeiei](https://github.com/RhoninSeiei)）：支持将当前仍可领取的 Steam 游戏作为独立分区“限时免费领取”并入游戏更新推送
@@ -138,7 +139,7 @@ AstrBot WebUI -> 插件 -> 插件配置
 | manual_query_workshop_command | 创意工坊手动查询指令（可配置多个） |
 | content_process_mode | 内容处理方式：`plugin` / `llm` |
 | llm_provider_id | LLM 提供商ID（可选，WebUI下拉选择） |
-| llm_timeout_sec | LLM 请求超时秒数（默认 `20`） |
+| llm_timeout_sec | LLM 请求超时秒数（默认 `30`，范围 `5-30`，超时后回退到插件内置处理） |
 | llm_prompt | LLM 提示词（仅 llm 模式生效） |
 | max_days | 每个游戏最多展示最近 N 天更新 |
 | content_max_chars | 单游戏正文最大字符数 |

@@ -2,6 +2,16 @@
 
 本文档记录 `astrbot_plugin_steam_updates` 的版本变更。
 
+## v1.3.5
+
+### 修复
+- 游戏新闻查询排除已标记的外部文章；API 使用 `is_external_url` 字段，Feed 使用 `externalpost` 链接路径识别
+- 游戏新闻去重状态改为按推送目标分别记录，已送达目标不因其他目标发送失败而重复收到同一批新闻；失败目标会在后续轮询重试
+- LLM 请求超时调整为默认及最大 30 秒（可配置范围 5-30 秒），超时后回退到插件内置处理，降低单轮轮询被模型请求长时间阻塞的风险
+
+<details>
+<summary>历史版本（点击展开）</summary>
+
 ## v1.3.4
 
 ### 修复
@@ -30,9 +40,6 @@
 - 由于 `Source` 是上游许可证中的保留字体名称，衍生字体重命名为 `SteamUpdatesCJK`
 - 字体来源与构建说明见 `font/FONT-NOTICE.txt`，完整字体许可证见 `font/OFL-1.1.txt`
 - README 新增内置字体来源、构建方式和独立许可说明
-
-<details>
-<summary>历史版本（点击展开）</summary>
 
 ## v1.3.0
 
