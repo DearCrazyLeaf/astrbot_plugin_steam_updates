@@ -2919,20 +2919,48 @@ class SteamUpdatePush(Star):
         return updates_by_app
 
     def _appid_map_path(self) -> Path:
+        return self._data_dir / "appid_name_map.json"
+
+    def _bundled_appid_map_path(self) -> Path:
         return Path(__file__).with_name("appid_map.json")
 
     def _load_appid_name_map(self) -> dict[str, Any]:
         if self._appid_name_map is not None:
             return self._appid_name_map
-        path = self._appid_map_path()
-        if path.exists():
+
+        bundled_map: dict[str, Any] = {}
+        bundled_path = self._bundled_appid_map_path()
+        if bundled_path.exists():
             try:
-                self._appid_name_map = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(self._appid_name_map, dict):
-                    return self._appid_name_map
+                data = json.loads(bundled_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    bundled_map = {str(key): value for key, value in data.items()}
+                else:
+                    self._debug("load bundled appid map failed: root is not an object")
             except Exception as exc:
-                self._debug(f"load appid map failed: {exc}")
-        self._appid_name_map = {}
+                self._debug(f"load bundled appid map failed: {exc}")
+
+        cached_map: dict[str, Any] = {}
+        cache_path = self._appid_map_path()
+        if cache_path.exists():
+            try:
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    cached_map = {str(key): value for key, value in data.items()}
+                else:
+                    self._debug("load appid name cache failed: root is not an object")
+            except Exception as exc:
+                self._debug(f"load appid name cache failed: {exc}")
+
+        # Bundled/manual names take precedence; the data-dir file stores fetched names.
+        merged_map = dict(cached_map)
+        for appid, bundled_value in bundled_map.items():
+            cached_value = cached_map.get(appid)
+            if isinstance(bundled_value, dict) and isinstance(cached_value, dict):
+                merged_map[appid] = {**cached_value, **bundled_value}
+            else:
+                merged_map[appid] = bundled_value
+        self._appid_name_map = merged_map
         return self._appid_name_map
 
     def _save_appid_name_map(self) -> None:
@@ -2940,6 +2968,7 @@ class SteamUpdatePush(Star):
             return
         try:
             path = self._appid_map_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 json.dumps(self._appid_name_map, ensure_ascii=False, indent=2),
                 encoding="utf-8",
