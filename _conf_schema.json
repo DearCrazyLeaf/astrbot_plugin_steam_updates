@@ -82,7 +82,7 @@
         "description": "启用 Steam Feed 回退",
         "type": "bool",
         "default": true,
-        "hint": "当 Steam News API 失败或无数据时，自动回退到 Steam 商店 Feed"
+        "hint": "当 Steam News API 失败或无数据时，自动回退到 Steam Feed 兜底"
       },
       "feed_timeout_sec": {
         "description": "Feed 回退请求超时(秒)",
@@ -268,14 +268,26 @@
         "default": 30,
         "hint": "范围 5-30，超时后回退到插件模式"
       },
+      "llm_input_max_chars": {
+        "description": "输入给 LLM 大模型的最大字数",
+        "type": "int",
+        "default": 8000,
+        "hint": "范围 1000-20000，超出部分会截断以控制模型输入量"
+      },
+      "llm_round_timeout_sec": {
+        "description": "单轮 LLM 总处理预算(秒)",
+        "type": "int",
+        "default": 90,
+        "hint": "范围 30-300；预算耗尽后本轮剩余公告保留原文并标注，不再请求模型"
+      },
       "llm_prompt": {
         "description": "LLM 提示词",
         "type": "text",
-        "default": "你是Steam游戏更新日志整理助手。请根据输入内容使用 {lang} 语言输出整理结果，如果语言已经是 {lang} 则仅编排格式后输出：\n- 保留结构与条目\n- 使用 [分类] 作为小节标题\n- 去除无意义符号与重复\n- 不要输出游戏名称仅更新内容\n- 不要输出Markdown代码块，不要带句号\n- 不要输出游戏信息和更新时间以及发布链接\n- 输出长度不超过 {max_chars} 字\n- 保持静默思考，不要把你的转化内容发送出来，避免被当作聊天回复处理\n\n【输入】\n{content}",
+        "default": "你是 Steam 游戏公告整理助手。请逐条整理输入公告，使用 {lang} 语言输出正文；若内容已经是 {lang}，则仅优化编排。\n- 保留每条公告的事实、结构与条目，不得合并公告\n- 去除无意义符号与重复，但不要丢失实质信息\n- 正文不输出游戏名称、发布时间或发布链接\n- 每条正文长度尽量控制在 {max_chars} 字以内\n- 不要输出与任务无关的解释",
         "hint": "支持变量：{app_name} {appid} {lang} {max_chars} {content}"
       },
       "content_max_chars": {
-        "description": "正文最大字符数(单游戏)",
+        "description": "单条公告正文最大字数",
         "type": "int",
         "default": 800
       }
@@ -343,7 +355,7 @@
         "description": "输出调试日志",
         "type": "bool",
         "default": false,
-        "hint": "仅输出到 AstrBot 控制台，不生成额外日志文件"
+        "hint": "该模式仅输出到 AstrBot 控制台，不生成额外日志文件"
       }
     }
   }
