@@ -51,6 +51,99 @@
       }
     }
   },
+  "subscription_settings": {
+    "description": "分会话订阅",
+    "type": "object",
+    "hint": "旧目标未配置独立条目时沿用全局订阅；新增条目完整覆盖该会话。删除条目会恢复全局继承，停止推送请使用暂停或清空列表。",
+    "items": {
+      "sessions": {
+        "type": "template_list",
+        "description": "会话订阅列表",
+        "default": [],
+        "templates": {
+          "session": {
+            "name": "会话订阅",
+            "display_item": "umo",
+            "items": {
+              "label": {
+                "description": "会话备注",
+                "type": "string",
+                "default": "",
+                "hint": "仅用于区分配置条目，不参与消息寻址"
+              },
+              "baseline_token": {
+                "description": "恢复订阅基线标识",
+                "type": "string",
+                "default": "",
+                "invisible": true
+              },
+              "umo": {
+                "description": "完整会话 UMO",
+                "type": "string",
+                "default": "",
+                "hint": "填写 /sid 返回的完整 UMO；同一个 UMO 只配置一次"
+              },
+              "enabled": {
+                "description": "启用本会话推送",
+                "type": "bool",
+                "default": true,
+                "hint": "关闭后暂停自动推送，仍保留订阅；不会回落到全局订阅"
+              },
+              "steam_appids": {
+                "description": "本会话游戏 AppID",
+                "type": "list",
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "hint": "完整替换全局游戏列表，留空表示不订阅游戏；每类最多100个正整数ID"
+              },
+              "workshop_item_ids": {
+                "description": "本会话创意工坊 ID",
+                "type": "list",
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "hint": "完整替换全局条目列表；仍须开启全局创意工坊总开关"
+              },
+              "free_games_mode": {
+                "description": "免费领取通知",
+                "type": "string",
+                "default": "inherit",
+                "options": [
+                  "inherit",
+                  "on",
+                  "off"
+                ],
+                "labels": [
+                  "继承全局",
+                  "开启",
+                  "关闭"
+                ],
+                "hint": "开启也不会绕过全局免费领取总开关"
+              },
+              "message_mode": {
+                "description": "本会话消息模式",
+                "type": "string",
+                "default": "inherit",
+                "options": [
+                  "inherit",
+                  "card",
+                  "text"
+                ],
+                "labels": [
+                  "继承全局",
+                  "图片卡片",
+                  "文字"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
   "game_updates": {
     "description": "游戏更新查询",
     "type": "object",
