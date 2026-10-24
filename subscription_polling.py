@@ -6,6 +6,33 @@ from datetime import datetime
 
 
 class SubscriptionPollingMixin:
+    def _prepare_subscription_state(self, state):
+        if "subscriptions_schema" not in state:
+            path = self._state_path.with_name("state.before-subscriptions-v1.json")
+            try:
+                with path.open("x", encoding="utf-8") as stream:
+                    json.dump(state, stream, ensure_ascii=False, indent=2)
+            except FileExistsError:
+                pass
+            state["subscriptions_schema"] = "1"
+
+    def _record_paused_subscriptions(self):
+        # Dashboard saves reload the plugin. Persist a pause even if no polling
+        # cycle occurs before the user enables that session again.
+        try:
+            paused = [p for p in self._resolve_subscriptions().values() if not p.enabled]
+        except ValueError:
+            return
+        if not paused:
+            return
+        state = self._load_state()
+        self._prepare_subscription_state(state)
+        for profile in paused:
+            state[self._subscription_state_key(profile)] = json.dumps(
+                self._subscription_snapshot(profile)
+            )
+        self._save_state(state)
+
     def _subscription_state_key(self, profile):
         return "subscriptions:" + self._target_ref(profile.target.umo)
 
@@ -63,15 +90,7 @@ class SubscriptionPollingMixin:
             for a, items in fetched.items()
         }
         state = self._load_state()
-        if "subscriptions_schema" not in state:
-            # Preserve a recoverable pre-migration snapshot, never overwrite it.
-            path = self._state_path.with_name("state.before-subscriptions-v1.json")
-            try:
-                with path.open("x", encoding="utf-8") as stream:
-                    json.dump(state, stream, ensure_ascii=False, indent=2)
-            except FileExistsError:
-                pass
-            state["subscriptions_schema"] = "1"
+        self._prepare_subscription_state(state)
 
         query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
         deadline = time.monotonic() + self._llm_round_timeout_sec()
@@ -258,6 +277,7 @@ class SubscriptionPollingMixin:
                 (i.date for sec in sections for i in sec.updates if i.date),
                 default=int(time.time()),
             )
+            profiles_by_target = {p.target: p for p, _ in entries}
             result = await self._deliver_poll_payload(
                 [p.target for p, _ in entries],
                 sections,
@@ -265,6 +285,9 @@ class SubscriptionPollingMixin:
                 query_text,
                 batch["kind"],
                 entries[0][0].mode,
+                target_guard=lambda target: self._profile_still_current(
+                    profiles_by_target[target]
+                ),
             )
             accepted = set(result.succeeded) | set(result.uncertain)
             if result.failed:

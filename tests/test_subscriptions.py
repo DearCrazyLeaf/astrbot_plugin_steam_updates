@@ -70,7 +70,7 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
                 for i in ids
             ]
 
-        async def deliver(targets, sections, publish, query, kind, mode):
+        async def deliver(targets, sections, publish, query, kind, mode, **kwargs):
             self.sent.append(
                 (tuple(t.umo for t in targets), deepcopy(sections), kind, mode)
             )
@@ -354,6 +354,84 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
         self.p._build_sections = build
         await self.p._poll_once()
         self.assertEqual(self.sent, [])
+
+    async def test_actual_card_render_rechecks_subscription_before_send(self):
+        self.config.update(notify_umos=[self.a], message_mode="card")
+        self.news = {"730": [self.item("new")]}
+        sent = []
+
+        async def send(**kwargs):
+            sent.append(kwargs["session"])
+            return True
+
+        async def render(*args, **kwargs):
+            self.rules(self.rule(self.a, ["730"], enabled=False))
+            return b"card"
+
+        self.p.context = SimpleNamespace(send_message=send)
+        self.p._render_card = render
+        self.p._deliver_poll_payload = self.m.SteamUpdatePush._deliver_poll_payload.__get__(self.p)
+        await self.p._poll_once()
+        self.assertEqual(sent, [])
+
+    async def test_next_target_rechecked_after_previous_send(self):
+        self.news = {"730": [self.item("new")]}
+        sent = []
+
+        async def send(**kwargs):
+            sent.append(kwargs["session"])
+            self.rules(self.rule(self.b, ["730"], enabled=False))
+            return True
+
+        self.p.context = SimpleNamespace(send_message=send)
+        self.p._deliver_poll_payload = self.m.SteamUpdatePush._deliver_poll_payload.__get__(self.p)
+        await self.p._poll_once()
+        self.assertEqual(sent, [self.a])
+
+    async def test_pause_during_unavailable_card_route_blocks_bot_and_text_fallback(self):
+        self.config.update(notify_umos=[], notify_group_ids=["100"], platform_id="qq-a", message_mode="card")
+        self.news = {"730": [self.item("new")]}
+        sent, bot_sent = [], []
+
+        async def send(**kwargs):
+            sent.append(kwargs["session"])
+            self.rules(self.rule(self.a, ["730"], enabled=False))
+            raise NotImplementedError("session route unavailable")
+
+        async def bot_send(**kwargs):
+            bot_sent.append(kwargs)
+
+        async def render(*args, **kwargs):
+            return b"card"
+
+        self.p.context = SimpleNamespace(send_message=send)
+        self.p._last_bot = SimpleNamespace(send_group_msg=bot_send)
+        self.p._last_platform_id = "qq-a"
+        self.p._render_card = render
+        self.p._deliver_poll_payload = self.m.SteamUpdatePush._deliver_poll_payload.__get__(self.p)
+        await self.p._poll_once()
+        self.assertEqual(sent, [self.a])
+        self.assertEqual(bot_sent, [])
+
+    async def test_ui_pause_reload_then_resume_does_not_replay_backlog(self):
+        self.config["notify_umos"] = [self.a]
+        self.news = {"730": [self.item("first")]}
+        await self.p._poll_once()
+        self.sent.clear()
+        rule = self.rule(self.a, ["730"], enabled=False)
+        self.rules(rule)
+        # Native config saves reload the plugin before the next poll.
+        await self.p.initialize()
+        self.p._poll_task.cancel()
+        await asyncio.gather(self.p._poll_task, return_exceptions=True)
+        self.p._release_poll_instance_claim()
+        rule["enabled"] = True
+        self.news["730"].insert(0, self.item("while-paused"))
+        await self.p._poll_once()
+        self.assertEqual(self.sent, [])
+        self.news["730"].insert(0, self.item("after-resume"))
+        await self.p._poll_once()
+        self.assertEqual([i.gid for _, secs, _, _ in self.sent for s in secs for i in s.updates], ["after-resume"])
 
     async def test_manual_query_uses_only_current_session_sources(self):
         self.rules(self.rule(self.a, ["730"]), self.rule(self.b, ["570"]))

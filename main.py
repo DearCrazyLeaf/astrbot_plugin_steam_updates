@@ -165,6 +165,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
     async def initialize(self):
         await self._ensure_http_client()
         self._cancel_legacy_poll_tasks()
+        self._record_paused_subscriptions()
         self._claim_poll_instance()
         self._poll_task = asyncio.create_task(self._poll_loop())
 
@@ -920,13 +921,15 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         query_text: str,
         card_kind: str,
         mode: str,
+        target_guard=None,
     ) -> PushResult:
+        guard_kwargs = {"target_guard": target_guard} if target_guard else {}
         if mode == "text":
             text = self._build_text_message(
                 sections,
                 publish_text,
             )
-            return await self._push_text(targets, text)
+            return await self._push_text(targets, text, **guard_kwargs)
 
         image_bytes = await self._render_card(
             sections,
@@ -939,11 +942,12 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
                 sections,
                 publish_text,
             )
-            return await self._push_text(targets, text)
+            return await self._push_text(targets, text, **guard_kwargs)
 
         image_result = await self._push_image(
             targets,
             image_bytes,
+            **guard_kwargs,
         )
         if not image_result.failed:
             return image_result
@@ -961,6 +965,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         text_result = await self._push_text(
             image_result.failed,
             text,
+            **guard_kwargs,
         )
         succeeded_targets = set(image_result.succeeded)
         succeeded_targets.update(text_result.succeeded)
@@ -4700,14 +4705,16 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         self,
         targets: list[NotifyTarget],
         text: str,
+        target_guard=None,
     ) -> PushResult:
         chain = MessageChain(chain=[Plain(text)])
-        return await self._push_chain(targets, chain)
+        return await self._push_chain(targets, chain, target_guard=target_guard)
 
     async def _push_image(
         self,
         targets: list[NotifyTarget],
         image_bytes: bytes,
+        target_guard=None,
     ) -> PushResult:
         path = self._save_temp_image(image_bytes)
         if not path:
@@ -4722,12 +4729,13 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
                 error_type=type(exc).__name__,
             )
             return PushResult([], list(targets))
-        return await self._push_chain(targets, chain)
+        return await self._push_chain(targets, chain, target_guard=target_guard)
 
     async def _push_chain(
         self,
         targets: list[NotifyTarget],
         chain: MessageChain,
+        target_guard=None,
     ) -> PushResult:
         self._log_debug(
             "push",
@@ -4739,10 +4747,13 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         failed: list[NotifyTarget] = []
         uncertain: list[NotifyTarget] = []
         for index, target in enumerate(targets, start=1):
+            if target_guard and not target_guard(target):
+                continue
             outcome = await self._send_to_target(
                 target,
                 chain,
                 target_index=index,
+                **({"target_guard": target_guard} if target_guard else {}),
             )
             fields = self._target_log_fields(
                 target.umo,
@@ -4765,6 +4776,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         target: NotifyTarget,
         chain: MessageChain,
         target_index: int,
+        target_guard=None,
     ) -> bool | None:
         fields = self._target_log_fields(
             target.umo,
@@ -4797,6 +4809,8 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
             )
             return None
 
+        if target_guard and not target_guard(target):
+            return False
         if not target.legacy_group_id:
             return False
         if target.platform_id != str(
