@@ -37,6 +37,10 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
+from astrbot.core.star.filter.command import GreedyStr
+from .subscriptions import SubscriptionMixin
+from .subscription_polling import SubscriptionPollingMixin
+
 PLUGIN_ID = "astrbot_plugin_steam_updates"
 STEAM_NEWS_API = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/"
 STEAM_NEWS_FEED_API = "https://store.steampowered.com/feeds/news/app/{appid}/"
@@ -106,7 +110,7 @@ class PushResult:
     uncertain: list[NotifyTarget] = field(default_factory=list)
 
 
-class SteamUpdatePush(Star):
+class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
     _CFG_GROUP_KEYS = (
         "basic_settings",
         "game_updates",
@@ -161,6 +165,7 @@ class SteamUpdatePush(Star):
     async def initialize(self):
         await self._ensure_http_client()
         self._cancel_legacy_poll_tasks()
+        self._record_paused_subscriptions()
         self._claim_poll_instance()
         self._poll_task = asyncio.create_task(self._poll_loop())
 
@@ -452,35 +457,11 @@ class SteamUpdatePush(Star):
             )
         return targets
 
-    def _manual_query_allowed(
-        self,
-        event_umo: str,
-        group_id: str,
-    ) -> bool:
-        legacy_values = self._cfg_list_values("notify_group_ids")
-        if group_id and group_id in {
-            value
-            for value in legacy_values
-            if value and ":" not in value
-        }:
-            return True
+    def _manual_query_allowed(self, event_umo: str, group_id: str) -> bool:
         try:
-            normalized_event = str(MessageSession.from_str(event_umo))
-        except Exception:
+            return self._subscription_target(event_umo).umo in self._resolve_subscriptions()
+        except ValueError:
             return False
-
-        configured_full = self._cfg_list_values("notify_umos")
-        configured_full.extend(
-            value for value in legacy_values if ":" in value
-        )
-        for index, value in enumerate(configured_full, start=1):
-            target = self._parse_notify_target(
-                value,
-                target_index=index,
-            )
-            if target is not None and target.umo == normalized_event:
-                return True
-        return False
 
     def _debug(self, msg: str):
         if self._cfg("debug_log", False):
@@ -889,13 +870,18 @@ class SteamUpdatePush(Star):
             return {}
 
     def _save_state(self, state: dict[str, str]) -> None:
+        temporary = self._state_path.with_name(self._state_path.name + "." + uuid.uuid4().hex + ".tmp")
         try:
-            self._state_path.write_text(
-                json.dumps(state, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            with temporary.open("w", encoding="utf-8") as stream:
+                json.dump(state, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self._state_path)
         except Exception as exc:
-            self._debug(f"save state failed: {exc}")
+            self._log_warn("state", "state persistence failed", error_type=type(exc).__name__)
+            raise
+        finally:
+            temporary.unlink(missing_ok=True)
 
     # --- polling ---
     async def _poll_loop(self):
@@ -926,397 +912,6 @@ class SteamUpdatePush(Star):
             except Exception:
                 logger.exception("[steam_updates][poll] loop execution failed")
 
-    async def _poll_once(self):
-        trace = self._next_trace_id("poll")
-        self._log_debug("poll", "start", trace=trace)
-        if not self._is_current_poll_instance():
-            self._log_warn(
-                "poll",
-                "skip: stale poll instance",
-                trace=trace,
-            )
-            return
-        if not bool(self._cfg("enable_push", True)):
-            self._log_debug(
-                "poll",
-                "skip: plugin disabled",
-                trace=trace,
-            )
-            return
-        targets = self._resolve_notify_targets()
-        if not targets:
-            self._log_debug(
-                "poll",
-                "skip: no valid notification targets",
-                trace=trace,
-            )
-            return
-        await self._ensure_http_client()
-        appids = self._normalize_appids(self._cfg("steam_appids", []))
-        free_games_enabled = self._free_games_enabled()
-        workshop_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
-        workshop_enabled = self._workshop_enabled() and bool(workshop_ids)
-        if not appids and not workshop_enabled and not free_games_enabled:
-            self._log_debug("poll", "skip: steam_appids/workshop/free_games all empty", trace=trace)
-            return
-
-        state = self._load_state()
-        max_days = self._get_max_days()
-        # Ensure enough items to cover all updates of today (Steam API has an upper bound).
-        fetch_count = max(max_days, 50)
-        self._log_debug(
-            "poll",
-            "resolved config",
-            trace=trace,
-            app_count=len(appids),
-            workshop_count=len(workshop_ids) if workshop_enabled else 0,
-            target_count=len(targets),
-            max_days=max_days,
-            fetch_count=fetch_count,
-        )
-        recent_updates_by_app: dict[str, list[NewsItem]] = {}
-        app_state_updates: dict[str, str] = {}
-        fetched_updates, failed_appids = await self._fetch_news_for_appids(
-            appids,
-            fetch_count,
-            only_today=True,
-            trace=trace,
-        )
-        for appid in appids:
-            items = fetched_updates.get(appid, [])
-            if not items:
-                self._log_debug("poll", "appid has no updates", trace=trace, appid=appid)
-                continue
-
-            filtered_items = self._filter_recent_days(items, max_days)
-            if not filtered_items:
-                self._log_debug("poll", "appid has no recent updates", trace=trace, appid=appid)
-                continue
-
-            latest_gid = filtered_items[0].gid
-            seen_key = self._news_seen_state_key(appid)
-            app_state_updates[appid] = latest_gid
-            app_state_updates[seen_key] = self._encode_news_seen_state(filtered_items)
-            recent_updates_by_app[appid] = filtered_items
-
-        state_before_target_migration = dict(state)
-        target_game_groups: dict[tuple[tuple[str, tuple[str, ...]], ...], dict[str, Any]] = {}
-        updates_by_app: dict[str, list[NewsItem]] = {}
-        for target in targets:
-            target_updates: dict[str, list[NewsItem]] = {}
-            for appid, items in recent_updates_by_app.items():
-                seen_set = self._target_news_seen_gids(
-                    state,
-                    target,
-                    appid,
-                    items,
-                )
-                pending_items = [item for item in items if item.gid not in seen_set]
-                if pending_items:
-                    target_updates[appid] = pending_items
-                    existing = updates_by_app.get(appid, [])
-                    known = {item.gid for item in existing}
-                    updates_by_app[appid] = existing + [
-                        item for item in pending_items if item.gid not in known
-                    ]
-
-            if target_updates:
-                signature = tuple(
-                    (appid, tuple(item.gid for item in items))
-                    for appid, items in target_updates.items()
-                )
-                group = target_game_groups.setdefault(
-                    signature,
-                    {"targets": [], "updates": target_updates},
-                )
-                group["targets"].append(target)
-
-        if not self._is_current_poll_instance():
-            self._log_warn("poll", "skip state update: stale poll instance", trace=trace)
-            return
-        # Persist migration baselines before a successful target advances the legacy snapshot.
-        if state != state_before_target_migration:
-            self._save_state(state)
-
-        workshop_updates: list[NewsItem] = []
-        workshop_state_updates: dict[str, str] = {}
-        if workshop_enabled:
-            workshop_updates, workshop_state_updates = await self._collect_workshop_updates_for_poll(state)
-            self._log_debug(
-                "poll",
-                "workshop collected",
-                trace=trace,
-                update_count=len(workshop_updates),
-                state_update_count=len(workshop_state_updates),
-            )
-
-        free_game_items_result = await self._fetch_free_game_items() if free_games_enabled else []
-        free_game_items = list(free_game_items_result or [])
-        free_game_state_updates: dict[str, str] = {}
-        new_free_game_items: list[NewsItem] = []
-        selected_free_game_items = self.PollFreeGameSelection(
-            attached_items=[],
-            standalone_items=[],
-        )
-        if free_games_enabled and free_game_items_result is not None:
-            free_state_key = self._free_games_state_key()
-            previous_free_gids = self._decode_news_seen_state(state.get(free_state_key, ""))
-            new_free_game_items, free_snapshot = self._split_new_free_game_items(
-                free_game_items,
-                previous_free_gids,
-            )
-            selected_free_game_items = self._select_poll_free_game_items(
-                has_game_updates=bool(updates_by_app),
-                active_items=free_game_items,
-                new_items=new_free_game_items,
-            )
-            free_game_state_updates[free_state_key] = json.dumps(free_snapshot, ensure_ascii=False)
-            self._log_debug(
-                "free_games",
-                "poll collected",
-                trace=trace,
-                active_count=len(free_game_items),
-                new_count=len(new_free_game_items),
-                attached_count=len(selected_free_game_items.attached_items),
-                standalone_count=len(selected_free_game_items.standalone_items),
-            )
-        elif free_games_enabled:
-            self._log_debug(
-                "free_games",
-                "poll skipped snapshot update due fetch failure",
-                trace=trace,
-            )
-
-        query_error_targets = {
-            target: {
-                appid
-                for appid in failed_appids
-                if self._query_error_notice_due(state, target, appid)
-            }
-            for target in targets
-        }
-        query_error_targets = {
-            target: appids_to_notify
-            for target, appids_to_notify in query_error_targets.items()
-            if appids_to_notify
-        }
-        if (
-            not updates_by_app
-            and not workshop_updates
-            and not selected_free_game_items.standalone_items
-            and not query_error_targets
-        ):
-            self._log_debug("poll", "no app/workshop/standalone_free_game has updates", trace=trace)
-            if workshop_state_updates:
-                state.update(workshop_state_updates)
-            if free_game_state_updates:
-                state.update(free_game_state_updates)
-            if not self._is_current_poll_instance():
-                self._log_warn("poll", "skip state update: stale poll instance", trace=trace)
-                return
-            self._save_state(state)
-            return
-        self._log_debug(
-            "poll",
-            "updates collected",
-            trace=trace,
-            app_count=len(updates_by_app),
-            workshop_update_count=len(workshop_updates),
-            free_game_new_count=len(new_free_game_items),
-            free_game_attached_count=len(selected_free_game_items.attached_items),
-            free_game_standalone_count=len(selected_free_game_items.standalone_items),
-            targets=len(targets),
-        )
-        if not self._is_current_poll_instance():
-            self._log_warn("poll", "abort push: stale poll instance", trace=trace)
-            return
-
-        payload_batches: list[tuple[str, list[AppSection]]] = []
-        if not updates_by_app and selected_free_game_items.standalone_items:
-            free_only_sections = self._merge_game_sections_with_free_games(
-                [],
-                selected_free_game_items.standalone_items,
-                free_only_when_no_news=True,
-            )
-            if free_only_sections:
-                payload_batches.append(("game", free_only_sections))
-        if workshop_updates:
-            workshop_sections = await self._build_workshop_sections(workshop_updates)
-            payload_batches.append(("workshop", workshop_sections))
-
-        query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
-        mode = str(self._cfg("message_mode", "card")).lower()
-        push_results: list[PushResult] = []
-        llm_deadline = time.monotonic() + self._llm_round_timeout_sec()
-
-        for group in target_game_groups.values():
-            group_targets = group["targets"]
-            group_updates = group["updates"]
-            updated_appids = [appid for appid in appids if appid in group_updates]
-            sections = await self._build_sections(
-                updated_appids,
-                group_updates,
-                llm_deadline=llm_deadline,
-            )
-            sections = self._merge_game_sections_with_free_games(
-                sections,
-                selected_free_game_items.attached_items,
-                free_only_when_no_news=True,
-            )
-            if not sections:
-                continue
-            latest_ts = max(
-                (
-                    item.date
-                    for section in sections
-                    for item in section.updates
-                    if item.date
-                ),
-                default=int(datetime.now().timestamp()),
-            )
-            publish_text = datetime.fromtimestamp(latest_ts).strftime("%Y/%m/%d %H:%M")
-            result = await self._deliver_poll_payload(
-                group_targets,
-                sections,
-                publish_text,
-                query_text,
-                "game",
-                mode,
-            )
-            push_results.append(result)
-            if result.failed:
-                self._log_warn(
-                    "poll",
-                    "payload has failed targets",
-                    trace=trace,
-                    card_kind="game",
-                    failed_count=len(result.failed),
-                    succeeded_count=len(result.succeeded),
-                )
-            for target in [*result.succeeded, *result.uncertain]:
-                for appid, delivered_items in group_updates.items():
-                    key = self._target_delivery_state_key(target, "news", appid)
-                    existing_gids = self._decode_news_seen_state(state.get(key, ""))
-                    delivered_gids = [item.gid for item in delivered_items]
-                    state[key] = self._encode_seen_gids(delivered_gids + existing_gids)
-                    if target in result.uncertain:
-                        uncertain_key = self._target_delivery_state_key(
-                            target,
-                            "news_uncertain",
-                            appid,
-                        )
-                        uncertain_gids = self._decode_news_seen_state(
-                            state.get(uncertain_key, "")
-                        )
-                        state[uncertain_key] = self._encode_seen_gids(
-                            delivered_gids + uncertain_gids
-                        )
-            if result.uncertain:
-                self._log_warn(
-                    "poll",
-                    "news delivery outcome unknown; suppressing automatic retry",
-                    trace=trace,
-                    target_count=len(result.uncertain),
-                )
-            if result.succeeded or result.uncertain:
-                if not self._is_current_poll_instance():
-                    self._log_warn("poll", "skip state update: stale poll instance", trace=trace)
-                    return
-                self._save_state(state)
-
-        for card_kind, sections in payload_batches:
-            latest_ts = max(
-                (
-                    item.date
-                    for sec in sections
-                    for item in sec.updates
-                    if item.date
-                ),
-                default=int(datetime.now().timestamp()),
-            )
-            publish_text = datetime.fromtimestamp(
-                latest_ts
-            ).strftime("%Y/%m/%d %H:%M")
-            result = await self._deliver_poll_payload(
-                targets,
-                sections,
-                publish_text,
-                query_text,
-                card_kind,
-                mode,
-            )
-            push_results.append(result)
-            if result.failed:
-                self._log_warn(
-                    "poll",
-                    "payload has failed targets",
-                    trace=trace,
-                    card_kind=card_kind,
-                    failed_count=len(result.failed),
-                    succeeded_count=len(result.succeeded),
-                )
-        for target, appids_to_notify in query_error_targets.items():
-            query_error_sections = await self._build_query_error_sections(appids_to_notify)
-            error_query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
-            result = await self._deliver_poll_payload(
-                [target],
-                query_error_sections,
-                error_query_text,
-                error_query_text,
-                "game",
-                mode,
-            )
-            push_results.append(result)
-            if result.succeeded or result.uncertain:
-                state_target = [*result.succeeded, *result.uncertain]
-                for notified_target in state_target:
-                    for appid in appids_to_notify:
-                        key = self._target_delivery_state_key(
-                            notified_target,
-                            "query_error",
-                            appid,
-                        )
-                        state[key] = str(int(time.time()))
-                if not self._is_current_poll_instance():
-                    self._log_warn("poll", "skip query error state update: stale poll instance", trace=trace)
-                    return
-                self._save_state(state)
-        self._log_debug(
-            "poll",
-            "push finished",
-            trace=trace,
-            app_count=len(updates_by_app),
-            workshop_update_count=len(workshop_updates),
-            free_game_attached_count=len(selected_free_game_items.attached_items),
-            free_game_standalone_count=len(selected_free_game_items.standalone_items),
-            payload_count=len(payload_batches),
-            targets=len(targets),
-        )
-
-        if not any(result.succeeded for result in push_results):
-            self._log_warn(
-                "poll",
-                "no notification sends confirmed; shared state preserved",
-                trace=trace,
-                payload_count=len(payload_batches),
-                target_count=len(targets),
-                uncertain_count=sum(len(result.uncertain) for result in push_results),
-            )
-            return
-
-        # update state only after push
-        if app_state_updates:
-            state.update(app_state_updates)
-        if workshop_state_updates:
-            state.update(workshop_state_updates)
-        if free_game_state_updates:
-            state.update(free_game_state_updates)
-
-        if not self._is_current_poll_instance():
-            self._log_warn("poll", "skip final state update: stale poll instance", trace=trace)
-            return
-        self._save_state(state)
-        self._log_debug("poll", "state updated", trace=trace, state_size=len(state))
 
     async def _deliver_poll_payload(
         self,
@@ -1326,13 +921,15 @@ class SteamUpdatePush(Star):
         query_text: str,
         card_kind: str,
         mode: str,
+        target_guard=None,
     ) -> PushResult:
+        guard_kwargs = {"target_guard": target_guard} if target_guard else {}
         if mode == "text":
             text = self._build_text_message(
                 sections,
                 publish_text,
             )
-            return await self._push_text(targets, text)
+            return await self._push_text(targets, text, **guard_kwargs)
 
         image_bytes = await self._render_card(
             sections,
@@ -1345,11 +942,12 @@ class SteamUpdatePush(Star):
                 sections,
                 publish_text,
             )
-            return await self._push_text(targets, text)
+            return await self._push_text(targets, text, **guard_kwargs)
 
         image_result = await self._push_image(
             targets,
             image_bytes,
+            **guard_kwargs,
         )
         if not image_result.failed:
             return image_result
@@ -1367,6 +965,7 @@ class SteamUpdatePush(Star):
         text_result = await self._push_text(
             image_result.failed,
             text,
+            **guard_kwargs,
         )
         succeeded_targets = set(image_result.succeeded)
         succeeded_targets.update(text_result.succeeded)
@@ -1389,6 +988,14 @@ class SteamUpdatePush(Star):
         )
 
     async def _manual_query(self, umo: str | None = None, query_kind: str = "all"):
+        profile = None
+        if umo is not None:
+            try:
+                profile = self._resolve_subscriptions().get(self._subscription_target(umo).umo)
+            except ValueError:
+                return None, "会话订阅配置无效"
+            if profile is None:
+                return None, "当前会话尚未订阅"
         await self._ensure_http_client()
         trace = self._next_trace_id("manual")
         kind = str(query_kind or "all").strip().lower()
@@ -1396,10 +1003,10 @@ class SteamUpdatePush(Star):
             kind = "all"
         want_game = kind in {"all", "game"}
         want_workshop = kind in {"all", "workshop"}
-        want_free_games = want_game and self._free_games_enabled()
+        want_free_games = want_game and (profile.free_games if profile else self._free_games_enabled())
 
-        appids = self._normalize_appids(self._cfg("steam_appids", []))
-        workshop_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
+        appids = list(profile.games) if profile else self._normalize_appids(self._cfg("steam_appids", []))
+        workshop_ids = list(profile.workshop) if profile else self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
         workshop_enabled = want_workshop and self._workshop_enabled() and bool(workshop_ids)
         game_source_available = bool(appids) or want_free_games
 
@@ -1447,7 +1054,7 @@ class SteamUpdatePush(Star):
                     continue
                 updates_by_app[appid] = items
 
-        workshop_all = await self._fetch_workshop_news_items() if workshop_enabled else []
+        workshop_all = await self._fetch_workshop_news_items(workshop_ids) if workshop_enabled else []
         workshop_updates = self._filter_today_items(workshop_all) if workshop_all else []
         free_game_items_result = await self._fetch_free_game_items() if want_free_games else []
         free_game_items = list(free_game_items_result or [])
@@ -1474,7 +1081,7 @@ class SteamUpdatePush(Star):
             )
             payload_batches = [("game", game_sections)] if game_sections else []
             query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
-            mode = str(self._cfg("message_mode", "card")).lower()
+            mode = profile.mode if profile else str(self._cfg("message_mode", "card")).lower()
             results: list[bytes | str] = []
             for card_kind, sections in payload_batches:
                 latest_ts = max(
@@ -1571,7 +1178,7 @@ class SteamUpdatePush(Star):
                 payload_batches.append(("workshop", workshop_sections))
 
         query_text = datetime.now().strftime("%Y/%m/%d %H:%M")
-        mode = str(self._cfg("message_mode", "card")).lower()
+        mode = profile.mode if profile else str(self._cfg("message_mode", "card")).lower()
         results: list[bytes | str] = []
         first_batch = True
         for card_kind, sections in payload_batches:
@@ -2675,10 +2282,11 @@ class SteamUpdatePush(Star):
             image_url=preview_url,
         )
 
-    async def _fetch_workshop_news_items(self) -> list[NewsItem]:
+    async def _fetch_workshop_news_items(self, item_ids: list[str] | None = None) -> list[NewsItem]:
         if not self._workshop_enabled():
             return []
-        item_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
+        if item_ids is None:
+            item_ids = self._normalize_workshop_item_ids(self._cfg("workshop_item_ids", []))
         if not item_ids:
             return []
         details = await self._fetch_workshop_details(item_ids)
@@ -5097,14 +4705,16 @@ class SteamUpdatePush(Star):
         self,
         targets: list[NotifyTarget],
         text: str,
+        target_guard=None,
     ) -> PushResult:
         chain = MessageChain(chain=[Plain(text)])
-        return await self._push_chain(targets, chain)
+        return await self._push_chain(targets, chain, target_guard=target_guard)
 
     async def _push_image(
         self,
         targets: list[NotifyTarget],
         image_bytes: bytes,
+        target_guard=None,
     ) -> PushResult:
         path = self._save_temp_image(image_bytes)
         if not path:
@@ -5119,12 +4729,13 @@ class SteamUpdatePush(Star):
                 error_type=type(exc).__name__,
             )
             return PushResult([], list(targets))
-        return await self._push_chain(targets, chain)
+        return await self._push_chain(targets, chain, target_guard=target_guard)
 
     async def _push_chain(
         self,
         targets: list[NotifyTarget],
         chain: MessageChain,
+        target_guard=None,
     ) -> PushResult:
         self._log_debug(
             "push",
@@ -5136,10 +4747,13 @@ class SteamUpdatePush(Star):
         failed: list[NotifyTarget] = []
         uncertain: list[NotifyTarget] = []
         for index, target in enumerate(targets, start=1):
+            if target_guard and not target_guard(target):
+                continue
             outcome = await self._send_to_target(
                 target,
                 chain,
                 target_index=index,
+                **({"target_guard": target_guard} if target_guard else {}),
             )
             fields = self._target_log_fields(
                 target.umo,
@@ -5162,6 +4776,7 @@ class SteamUpdatePush(Star):
         target: NotifyTarget,
         chain: MessageChain,
         target_index: int,
+        target_guard=None,
     ) -> bool | None:
         fields = self._target_log_fields(
             target.umo,
@@ -5194,6 +4809,8 @@ class SteamUpdatePush(Star):
             )
             return None
 
+        if target_guard and not target_guard(target):
+            return False
         if not target.legacy_group_id:
             return False
         if target.platform_id != str(
@@ -5297,6 +4914,18 @@ class SteamUpdatePush(Star):
             pass
         text = "".join(parts).strip()
         return text
+
+    @filter.command("STEAM订阅", alias={"steam_sub"})
+    async def steam_subscriptions(self, event: AstrMessageEvent, args: GreedyStr):
+        """查看或管理当前会话的 Steam 订阅。"""
+        yield event.plain_result(await self._subscription_command(event, args))
+        event.stop_event()
+
+    @filter.command("STEAM全局订阅", alias={"steam_sub_global"})
+    async def steam_global_subscriptions(self, event: AstrMessageEvent, args: GreedyStr):
+        """AstrBot 管理员通过完整 UMO 管理指定会话。"""
+        yield event.plain_result(await self._subscription_command(event, args, global_scope=True))
+        event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def steam_updates_on_group_message(self, event: AstrMessageEvent):
@@ -5417,4 +5046,6 @@ class SteamUpdatePush(Star):
 
 
 class Main(SteamUpdatePush):
-    pass
+    async def terminate(self):
+        # AstrBot checks the registered class's own methods during reload.
+        await super().terminate()
