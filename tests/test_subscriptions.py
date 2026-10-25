@@ -239,6 +239,7 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(self.p._manual_query_allowed(private_umo))
         self.assertFalse(self.p._manual_query_allowed(self.a))
+        self.news = {"42": [self.item("private-news", "42")]}
         result, error = await self.p._manual_query(private_umo, "game")
         self.assertIsNone(error)
         self.assertEqual(self.fetches, [["42"]])
