@@ -46,6 +46,7 @@ def _install_stub_modules() -> None:
 
     class _EventMessageType:
         GROUP_MESSAGE = "group"
+        FRIEND_MESSAGE = "friend"
 
     filter_obj = types.SimpleNamespace(
         EventMessageType=_EventMessageType,

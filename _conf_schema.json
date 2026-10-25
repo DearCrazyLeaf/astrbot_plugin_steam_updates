@@ -54,7 +54,7 @@
   "subscription_settings": {
     "description": "分会话订阅",
     "type": "object",
-    "hint": "旧目标未配置独立条目时沿用全局订阅；新增条目完整覆盖该会话。删除条目会恢复全局继承，停止推送请使用暂停或清空列表。",
+    "hint": "列表为空时使用全局目标和订阅；列表非空时仅按卡片推送，不再向未配置会话回落全局。卡片支持群聊和私聊；创意工坊及免费领取仍受全局总开关控制。",
     "items": {
       "sessions": {
         "type": "template_list",
@@ -81,7 +81,7 @@
                 "description": "完整会话 UMO",
                 "type": "string",
                 "default": "",
-                "hint": "填写 /sid 返回的完整 UMO；同一个 UMO 只配置一次"
+                "hint": "填写 /sid 返回的完整 UMO；同一个 UMO 请只配置一次。重复卡片仅第一条有效配置生效，后续重复项会记录告警；WebUI 不提供即时唯一性校验"
               },
               "enabled": {
                 "description": "启用本会话推送",
@@ -121,7 +121,7 @@
                   "开启",
                   "关闭"
                 ],
-                "hint": "开启也不会绕过全局免费领取总开关"
+                "hint": "卡片开关受全局免费领取总开关控制；全局关闭时所有会话均不推送"
               },
               "message_mode": {
                 "description": "本会话消息模式",
@@ -206,7 +206,7 @@
         "description": "启用限时免费领取活动",
         "type": "bool",
         "default": false,
-        "hint": "开启后会查询当前仍可领取的 Steam 游戏，并作为独立分区附在游戏更新后面"
+        "hint": "全局免费领取总开关；关闭时任何会话卡片都不能推送。开启后再由会话卡片的免费领取选项控制各会话"
       },
       "free_games_manual_only_when_no_news": {
         "description": "无普通更新时仅返回免费领取分区",
@@ -231,7 +231,7 @@
         "description": "启用创意工坊订阅监控",
         "type": "bool",
         "default": false,
-        "hint": "开启后会轮询 workshop_item_ids 并在有更新时推送"
+        "hint": "创意工坊总开关；会话卡片中的 workshop_item_ids 也只有在开启后才会查询和推送"
       },
       "workshop_item_ids": {
         "description": "创意工坊订阅ID列表",

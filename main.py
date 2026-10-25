@@ -457,7 +457,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
             )
         return targets
 
-    def _manual_query_allowed(self, event_umo: str, group_id: str) -> bool:
+    def _manual_query_allowed(self, event_umo: str) -> bool:
         try:
             return self._subscription_target(event_umo).umo in self._resolve_subscriptions()
         except ValueError:
@@ -4929,6 +4929,15 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def steam_updates_on_group_message(self, event: AstrMessageEvent):
+        async for result in self._steam_updates_on_message(event):
+            yield result
+
+    @filter.event_message_type(filter.EventMessageType.FRIEND_MESSAGE)
+    async def steam_updates_on_friend_message(self, event: AstrMessageEvent):
+        async for result in self._steam_updates_on_message(event):
+            yield result
+
+    async def _steam_updates_on_message(self, event: AstrMessageEvent):
         game_commands = self._manual_game_query_commands()
         workshop_commands = self._manual_workshop_query_commands()
         text = self._normalize_manual_command_text(self._get_event_text(event))
@@ -4969,25 +4978,20 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
             group_id=group_id,
             user_id=user_id,
         )
-        if not group_id:
-            self._log_warn("manual_cmd", "reject: no group id", command=text, user_id=user_id)
-            yield event.plain_result("请在群聊中使用该指令")
-            return
-
         if not bool(self._cfg("enable_push", True)):
             self._log_warn("manual_cmd", "reject: plugin disabled", group_id=group_id, user_id=user_id)
             yield event.plain_result("插件未启用")
             return
 
         event_umo = str(event.unified_msg_origin or "").strip()
-        if not self._manual_query_allowed(event_umo, group_id):
+        if not self._manual_query_allowed(event_umo):
             self._log_warn(
                 "manual_cmd",
-                "reject: group not allowed",
+                "reject: session not subscribed",
                 group_id=group_id,
                 user_id=user_id,
             )
-            yield event.plain_result("当前群未启用插件")
+            yield event.plain_result("当前会话未启用插件")
             return
 
         if query_kind == "workshop":

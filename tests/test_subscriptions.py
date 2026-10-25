@@ -39,6 +39,7 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
             self.p = self.m.SteamUpdatePush(None, self.config)
         self.p._is_current_poll_instance = lambda: True
         self.sent, self.fetches = [], []
+        self.free_fetches = 0
         self.news, self.failed, self.workshop, self.free = {}, set(), [], []
         self.outcomes = {}
 
@@ -56,6 +57,7 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
             return [i for i in self.workshop if i.gid.split(":", 1)[0] in ids]
 
         async def free():
+            self.free_fetches += 1
             return self.free
 
         async def build(ids, updates, *args, **kwargs):
@@ -145,15 +147,72 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(profiles[self.b].enabled)
         self.assertEqual(profiles[self.b].games, ("570",))
 
-    def test_duplicate_or_invalid_explicit_rule_blocks_legacy_target(self):
-        for entries in (
-            [self.rule(self.a), self.rule(self.a)],
-            [self.rule(self.a, ["bad"])],
-        ):
-            self.rules(*entries)
-            profiles = self.p._resolve_subscriptions()
-            self.assertNotIn(self.a, profiles)
-            self.assertIn(self.b, profiles)
+    def test_session_cards_exclusively_route_and_first_valid_duplicate_wins(self):
+        self.config.update(
+            workshop_enable=True,
+            workshop_item_ids=["99"],
+            free_games_enable=True,
+        )
+        self.rules(
+            self.rule(
+                self.a,
+                ["730"],
+                workshop_item_ids=["101"],
+                free_games_mode="on",
+            ),
+            self.rule(self.a, ["570"], workshop_item_ids=["102"]),
+        )
+        profiles = self.p._resolve_subscriptions()
+        self.assertEqual(set(profiles), {self.a})
+        self.assertEqual(profiles[self.a].games, ("730",))
+        self.assertEqual(profiles[self.a].workshop, ("101",))
+        self.assertTrue(profiles[self.a].free_games)
+
+    def test_invalid_session_card_disables_global_fallback(self):
+        self.rules(self.rule(self.a, ["bad"]))
+        self.assertEqual(self.p._resolve_subscriptions(), {})
+
+    def test_invalid_duplicate_does_not_mask_first_valid_entry(self):
+        self.rules(self.rule(self.a, ["bad"]), self.rule(self.a, ["570"]))
+        profiles = self.p._resolve_subscriptions()
+        self.assertEqual(set(profiles), {self.a})
+        self.assertEqual(profiles[self.a].games, ("570",))
+
+    async def test_session_routing_excludes_global_only_targets_and_sources(self):
+        self.config.update(
+            steam_appids=["730", "570"],
+            workshop_enable=True,
+            workshop_item_ids=["99"],
+            workshop_push_on_first_seen=True,
+            free_games_enable=True,
+        )
+        self.rules(
+            self.rule(
+                self.a,
+                ["570"],
+                workshop_item_ids=["101"],
+                free_games_mode="on",
+            )
+        )
+        self.news = {"570": [self.item("game", "570")]}
+        self.workshop = [self.item("101:1")]
+        self.free = [self.item("free")]
+
+        await self.p._poll_once()
+
+        self.assertEqual(self.fetches, [["570"]])
+        self.assertEqual(self.workshop_fetch, ["101"])
+        self.assertEqual(self.free_fetches, 1)
+        self.assertTrue(self.sent)
+        self.assertTrue(all(set(targets) == {self.a} for targets, _, _, _ in self.sent))
+
+    def test_other_message_card_and_admin_target_parsing_remain_valid(self):
+        target = "bot:OtherMessage:room:thread"
+        self.rules(self.rule(target, ["730"]))
+        self.assertEqual(
+            self.p._resolve_subscriptions()[target].games, ("730",)
+        )
+        self.assertEqual(self.p._subscription_target(target).umo, target)
 
     async def test_group_admin_and_owner_edit_current_session_only(self):
         for role in ("admin", "owner"):
@@ -167,13 +226,35 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
                 await self.p._subscription_can_edit(self.event(role=role), self.a, True)
             )
 
-    async def test_member_private_and_failed_role_lookup_are_readonly(self):
-        for event in (
-            self.event(),
-            self.event("qq-a:FriendMessage:user", role="owner"),
-        ):
-            result = await self.p._subscription_command(event, "添加 游戏 42")
-            self.assertIn("权限不足", result)
+    async def test_private_user_can_manage_only_current_private_session(self):
+        private_umo = "qq-a:FriendMessage:user"
+        event = self.event(private_umo)
+        result = await self.p._subscription_command(event, "添加 游戏 42")
+        self.assertIn("已添加", result)
+        self.assertEqual(
+            self.p._resolve_subscriptions()[private_umo].games, ("42",)
+        )
+        self.assertFalse(
+            await self.p._subscription_can_edit(event, self.a)
+        )
+        self.assertTrue(self.p._manual_query_allowed(private_umo))
+        self.assertFalse(self.p._manual_query_allowed(self.a))
+        result, error = await self.p._manual_query(private_umo, "game")
+        self.assertIsNone(error)
+        self.assertEqual(self.fetches, [["42"]])
+
+    async def test_command_selects_first_valid_duplicate_entry(self):
+        self.rules(self.rule(self.a, ["bad"]), self.rule(self.a, ["570"]))
+        result = await self.p._subscription_command(
+            self.event(admin=True), "添加 游戏 42"
+        )
+        self.assertIn("已添加", result)
+        profiles = self.p._resolve_subscriptions()
+        self.assertEqual(profiles[self.a].games, ("570", "42"))
+
+    async def test_member_and_failed_group_role_lookup_are_readonly(self):
+        result = await self.p._subscription_command(self.event(), "添加 游戏 42")
+        self.assertIn("权限不足", result)
         event = self.event()
 
         async def unavailable(*args):
@@ -191,7 +272,7 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("已添加", result)
         self.assertEqual(self.p._resolve_subscriptions()[target].games, ("42",))
-        self.assertIn(self.a, self.p._resolve_subscriptions())
+        self.assertNotIn(self.a, self.p._resolve_subscriptions())
 
     async def test_command_copies_legacy_then_keeps_empty_override(self):
         result = await self.p._subscription_command(
@@ -199,7 +280,7 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("已删除", result)
         self.assertEqual(self.p._resolve_subscriptions()[self.a].games, ())
-        self.assertEqual(self.p._resolve_subscriptions()[self.b].games, ("730", "570"))
+        self.assertNotIn(self.b, self.p._resolve_subscriptions())
         self.assertEqual(
             self.config.saved["subscription_settings"]["sessions"][0]["steam_appids"],
             [],
@@ -441,6 +522,15 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fetches, [["730"]])
         self.assertIn("Game 730", results[0])
         self.assertNotIn("570", results[0])
+
+    async def test_global_mode_is_used_only_when_session_card_list_is_empty(self):
+        self.assertEqual(
+            set(self.p._resolve_subscriptions()), {self.a, self.b}
+        )
+        self.rules(self.rule(self.a, ["570"]))
+        profiles = self.p._resolve_subscriptions()
+        self.assertEqual(set(profiles), {self.a})
+        self.assertEqual(profiles[self.a].games, ("570",))
 
     async def test_failed_initial_legacy_fetch_is_not_discarded_on_retry(self):
         self.rules(self.rule(self.a, ["730"]), self.rule(self.b, []))

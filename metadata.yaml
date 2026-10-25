@@ -1,6 +1,6 @@
 name: astrbot_plugin_steam_updates
 display_name: Steam游戏/创意工坊更新推送插件
-version: v1.3.7
+version: v1.3.8
 astrbot_version: ">=4.12.0"
 author: DearCrazyLeaf & RhoninSeiei
 description: 轮询游戏/创意工坊更新/喜加一并推送（支持多 AppID 创意工坊ID / 卡片或文本）

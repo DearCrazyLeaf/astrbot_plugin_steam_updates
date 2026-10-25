@@ -56,51 +56,68 @@ class SubscriptionMixin:
             raise ValueError("UMO 格式无效")
         return target
 
+    def _subscription_entry_values(self, entry):
+        if not isinstance(entry, dict):
+            raise ValueError("订阅条目必须为对象")
+        target = self._subscription_target(entry.get("umo"))
+        mode = entry.get("message_mode", "inherit")
+        free = entry.get("free_games_mode", "inherit")
+        enabled = entry.get("enabled", True)
+        if mode not in ("inherit", "card", "text") or free not in (
+            "inherit",
+            "on",
+            "off",
+        ):
+            raise ValueError("订阅模式无效")
+        if not isinstance(enabled, bool):
+            raise ValueError("启用状态必须为布尔值")
+        games = ids(entry.get("steam_appids", []))
+        workshop = ids(entry.get("workshop_item_ids", []))
+        return target, games, workshop, mode, free, enabled
+
+    def _subscription_entry_target_matches(self, entry, target_umo):
+        try:
+            return self._subscription_target(entry.get("umo")).umo == target_umo
+        except ValueError:
+            return False
+
     def _resolve_subscriptions(self):
+        entries = self._subscription_entries()
         legacy = {target.umo: target for target in self._resolve_notify_targets()}
-        result = {
-            umo: Subscription(
-                target,
-                tuple(self._normalize_appids(self._cfg("steam_appids", []))),
-                tuple(
-                    self._normalize_workshop_item_ids(
-                        self._cfg("workshop_item_ids", [])
+        result = {}
+        if not entries:
+            result = {
+                umo: Subscription(
+                    target,
+                    tuple(self._normalize_appids(self._cfg("steam_appids", []))),
+                    tuple(
+                        self._normalize_workshop_item_ids(
+                            self._cfg("workshop_item_ids", [])
+                        )
                     )
+                    if self._workshop_enabled()
+                    else (),
+                    self._free_games_enabled(),
+                    str(self._cfg("message_mode", "card")),
+                    legacy=True,
                 )
-                if self._workshop_enabled()
-                else (),
-                self._free_games_enabled(),
-                str(self._cfg("message_mode", "card")),
-                legacy=True,
-            )
-            for umo, target in legacy.items()
-        }
-        seen, blocked = set(), set()
-        for entry in self._subscription_entries():
+                for umo, target in legacy.items()
+            }
+        seen = set()
+        for entry in entries:
             target = None
             try:
-                if not isinstance(entry, dict):
-                    raise ValueError("订阅条目必须为对象")
-                target = self._subscription_target(entry.get("umo"))
-                if target.umo in seen:
-                    blocked.add(target.umo)
-                    raise ValueError("同一 UMO 只能配置一个订阅条目")
-                seen.add(target.umo)
-                mode = entry.get("message_mode", "inherit")
-                free = entry.get("free_games_mode", "inherit")
-                enabled = entry.get("enabled", True)
-                if mode not in ("inherit", "card", "text") or free not in (
-                    "inherit",
-                    "on",
-                    "off",
-                ):
-                    raise ValueError("订阅模式无效")
-                if not isinstance(enabled, bool):
-                    raise ValueError("启用状态必须为布尔值")
-                games, workshop = (
-                    ids(entry.get("steam_appids", [])),
-                    ids(entry.get("workshop_item_ids", [])),
+                target, games, workshop, mode, free, enabled = (
+                    self._subscription_entry_values(entry)
                 )
+                if target.umo in seen:
+                    self._log_warn(
+                        "subscription",
+                        "duplicate session UMO ignored; keeping first valid entry",
+                        umo=target.umo,
+                    )
+                    continue
+                seen.add(target.umo)
                 result[target.umo] = Subscription(
                     legacy.get(target.umo, target),
                     games,
@@ -116,13 +133,9 @@ class SubscriptionMixin:
                     str(entry.get("baseline_token", "")),
                 )
             except ValueError as exc:
-                if target is not None:
-                    blocked.add(target.umo)
                 self._log_warn(
                     "subscription", "invalid subscription entry", error=str(exc)
                 )
-        for umo in blocked:
-            result.pop(umo, None)
         return result
 
     async def _subscription_can_edit(self, event, target_umo, global_scope=False):
@@ -130,8 +143,13 @@ class SubscriptionMixin:
             return True
         if global_scope or str(event.unified_msg_origin).strip() != target_umo:
             return False
+        message_type = target_umo.split(":", 2)[1]
+        if message_type == "FriendMessage":
+            return True
+        if message_type != "GroupMessage":
+            return False
         group_id = str(event.get_group_id() or "")
-        if not group_id or ":GroupMessage:" not in target_umo:
+        if not group_id:
             return False
         if target_umo.split(":", 2)[2] != group_id:
             return False
@@ -184,7 +202,7 @@ class SubscriptionMixin:
                     self._resolve_subscriptions().get(target.umo)
                 )
             if not await self._subscription_can_edit(event, target.umo, global_scope):
-                return "权限不足：仅 AstrBot 管理员或可验证的本群群主、管理员可修改订阅"
+                return "权限不足：仅 AstrBot 管理员、当前私聊用户或可验证的本群群主/管理员可修改订阅"
             if not hasattr(self, "_subscription_edit_lock"):
                 self._subscription_edit_lock = asyncio.Lock()
             async with self._subscription_edit_lock:
@@ -195,12 +213,25 @@ class SubscriptionMixin:
                     e
                     for e in entries
                     if isinstance(e, dict)
-                    and str(e.get("umo", "")).strip() == target.umo
+                    and self._subscription_entry_target_matches(e, target.umo)
                 ]
+                configured_matches = list(matches)
+                valid_matches = []
+                for candidate in matches:
+                    try:
+                        self._subscription_entry_values(candidate)
+                    except ValueError:
+                        continue
+                    valid_matches.append(candidate)
                 if len(matches) > 1:
-                    return "当前 UMO 存在重复条目，请在配置界面合并后再操作"
+                    self._log_warn(
+                        "subscription",
+                        "duplicate session UMO entries; command uses first entry",
+                        umo=target.umo,
+                    )
+                matches = valid_matches[:1]
                 profile = self._resolve_subscriptions().get(target.umo)
-                if matches and profile is None:
+                if configured_matches and not matches:
                     return "当前订阅条目无效，请先在配置界面修正"
                 entry = (
                     matches[0]
@@ -267,9 +298,9 @@ class SubscriptionMixin:
                         "继承": "inherit",
                     }[args[1]]
                 elif args == ["恢复全局", "确认"]:
-                    entries = [e for e in entries if e not in matches]
+                    entries = [e for e in entries if e not in configured_matches]
                     entry = None
-                    feedback = "已移除独立规则；是否推送由原全局目标列表决定"
+                    feedback = "已移除独立规则；仅当所有会话卡片都移除后才恢复全局推送"
                 else:
                     return "用法：/STEAM订阅 列表 | 添加/删除 游戏/创意工坊 ID... | 免费领取 开启/关闭/继承 | 模式 图片/文字/继承 | 暂停 | 恢复 | 恢复全局 确认"
                 if entry is not None and not matches:
