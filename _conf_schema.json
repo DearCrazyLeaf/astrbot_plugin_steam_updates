@@ -51,6 +51,99 @@
       }
     }
   },
+  "subscription_settings": {
+    "description": "按群聊/会话设置推送",
+    "type": "object",
+    "hint": "未添加群聊/会话时使用上方全局设置；添加后仅按下方卡片推送，不在列表中的会话不会收到消息；免费领取和创意工坊仍受各自的全局开关控制",
+    "items": {
+      "sessions": {
+        "type": "template_list",
+        "description": "群聊/会话列表",
+        "default": [],
+        "templates": {
+          "session": {
+            "name": "群聊/会话设置",
+            "display_item": "umo",
+            "items": {
+              "label": {
+                "description": "备注名称",
+                "type": "string",
+                "default": "",
+                "hint": "方便识别这张设置卡片，不影响消息推送"
+              },
+              "baseline_token": {
+                "description": "恢复订阅基线标识",
+                "type": "string",
+                "default": "",
+                "invisible": true
+              },
+              "umo": {
+                "description": "群聊/会话标识",
+                "type": "string",
+                "default": "",
+                "hint": "发送 /sid 获取后粘贴完整内容；同一个群聊/会话只添加一次，重复时仅第一条设置生效"
+              },
+              "enabled": {
+                "description": "开启此处推送",
+                "type": "bool",
+                "default": true,
+                "hint": "关闭后暂停此群聊/会话的自动推送，设置会保留"
+              },
+              "steam_appids": {
+                "description": "订阅的 Steam 游戏",
+                "type": "list",
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "hint": "填写 Steam 游戏 AppID，此列表会替代上方全局游戏列表；留空表示不订阅游戏，最多添加100个"
+              },
+              "workshop_item_ids": {
+                "description": "订阅的创意工坊条目",
+                "type": "list",
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "hint": "填写创意工坊条目 ID，此列表会替代上方全局列表；还需开启全局创意工坊推送"
+              },
+              "free_games_mode": {
+                "description": "限时免费领取通知",
+                "type": "string",
+                "default": "inherit",
+                "options": [
+                  "inherit",
+                  "on",
+                  "off"
+                ],
+                "labels": [
+                  "继承全局",
+                  "开启",
+                  "关闭"
+                ],
+                "hint": "选择是否在此群聊/会话推送限时免费游戏；全局开关关闭时不会推送"
+              },
+              "message_mode": {
+                "description": "消息显示方式",
+                "type": "string",
+                "default": "inherit",
+                "options": [
+                  "inherit",
+                  "card",
+                  "text"
+                ],
+                "labels": [
+                  "继承全局",
+                  "图片卡片",
+                  "文字"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
   "game_updates": {
     "description": "游戏更新查询",
     "type": "object",
@@ -113,7 +206,7 @@
         "description": "启用限时免费领取活动",
         "type": "bool",
         "default": false,
-        "hint": "开启后会查询当前仍可领取的 Steam 游戏，并作为独立分区附在游戏更新后面"
+        "hint": "全局免费领取总开关：关闭时任何会话卡片都不能推送；开启后再由会话卡片的免费领取选项控制各会话"
       },
       "free_games_manual_only_when_no_news": {
         "description": "无普通更新时仅返回免费领取分区",
@@ -138,7 +231,7 @@
         "description": "启用创意工坊订阅监控",
         "type": "bool",
         "default": false,
-        "hint": "开启后会轮询 workshop_item_ids 并在有更新时推送"
+        "hint": "创意工坊总开关：会话卡片中的 workshop_item_ids 也只有在开启后才会查询和推送"
       },
       "workshop_item_ids": {
         "description": "创意工坊订阅ID列表",
