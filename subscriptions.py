@@ -144,8 +144,6 @@ class SubscriptionMixin:
         if global_scope or str(event.unified_msg_origin).strip() != target_umo:
             return False
         message_type = target_umo.split(":", 2)[1]
-        if message_type == "FriendMessage":
-            return True
         if message_type != "GroupMessage":
             return False
         group_id = str(event.get_group_id() or "")
@@ -202,7 +200,7 @@ class SubscriptionMixin:
                     self._resolve_subscriptions().get(target.umo)
                 )
             if not await self._subscription_can_edit(event, target.umo, global_scope):
-                return "权限不足：仅 AstrBot 管理员、当前私聊用户或可验证的本群群主/管理员可修改订阅"
+                return "权限不足：仅 AstrBot 管理员或可验证的本群群主/管理员可修改订阅"
             if not hasattr(self, "_subscription_edit_lock"):
                 self._subscription_edit_lock = asyncio.Lock()
             async with self._subscription_edit_lock:
@@ -243,10 +241,8 @@ class SubscriptionMixin:
                         "enabled": True,
                         "steam_appids": list(profile.games) if profile else [],
                         "workshop_item_ids": list(profile.workshop) if profile else [],
-                        "free_games_mode": "on"
-                        if profile and profile.free_games
-                        else "off",
-                        "message_mode": profile.mode if profile else "inherit",
+                        "free_games_mode": "inherit",
+                        "message_mode": "inherit",
                     }
                 )
                 feedback = "订阅设置已保存"

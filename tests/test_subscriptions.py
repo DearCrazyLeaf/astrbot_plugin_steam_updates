@@ -226,23 +226,30 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
                 await self.p._subscription_can_edit(self.event(role=role), self.a, True)
             )
 
-    async def test_private_user_can_manage_only_current_private_session(self):
+    async def test_private_user_cannot_manage_but_can_query_configured_session(self):
         private_umo = "qq-a:FriendMessage:user"
         event = self.event(private_umo)
         result = await self.p._subscription_command(event, "添加 游戏 42")
-        self.assertIn("已添加", result)
-        self.assertEqual(
-            self.p._resolve_subscriptions()[private_umo].games, ("42",)
-        )
+        self.assertIn("权限不足", result)
+        self.assertNotIn(private_umo, self.p._resolve_subscriptions())
         self.assertFalse(
             await self.p._subscription_can_edit(event, self.a)
         )
+
+        self.rules(self.rule(private_umo, ["42"]))
         self.assertTrue(self.p._manual_query_allowed(private_umo))
         self.assertFalse(self.p._manual_query_allowed(self.a))
         self.news = {"42": [self.item("private-news", "42")]}
         result, error = await self.p._manual_query(private_umo, "game")
         self.assertIsNone(error)
         self.assertEqual(self.fetches, [["42"]])
+
+        admin_event = self.event(private_umo, admin=True)
+        result = await self.p._subscription_command(admin_event, "添加 游戏 43")
+        self.assertIn("已添加", result)
+        self.assertEqual(
+            self.p._resolve_subscriptions()[private_umo].games, ("42", "43")
+        )
 
     async def test_command_selects_first_valid_duplicate_entry(self):
         self.rules(self.rule(self.a, ["bad"]), self.rule(self.a, ["570"]))
@@ -286,6 +293,25 @@ class SubscriptionsTest(unittest.IsolatedAsyncioTestCase):
             self.config.saved["subscription_settings"]["sessions"][0]["steam_appids"],
             [],
         )
+
+    async def test_first_command_keeps_free_games_and_message_mode_inherited(self):
+        self.config["free_games_enable"] = True
+        result = await self.p._subscription_command(
+            self.event(admin=True), "添加 游戏 42"
+        )
+        self.assertIn("已添加", result)
+        entry = self.config.saved["subscription_settings"]["sessions"][0]
+        self.assertEqual(entry["free_games_mode"], "inherit")
+        self.assertEqual(entry["message_mode"], "inherit")
+
+        self.config["message_mode"] = "card"
+        self.config["free_games_enable"] = False
+        profile = self.p._resolve_subscriptions()[self.a]
+        self.assertEqual(profile.mode, "card")
+        self.assertFalse(profile.free_games)
+
+        self.config["free_games_enable"] = True
+        self.assertTrue(self.p._resolve_subscriptions()[self.a].free_games)
 
     async def test_parallel_commands_and_save_failure(self):
         await asyncio.gather(
