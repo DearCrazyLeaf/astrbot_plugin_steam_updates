@@ -4932,8 +4932,8 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         async for result in self._steam_updates_on_message(event):
             yield result
 
-    @filter.event_message_type(filter.EventMessageType.FRIEND_MESSAGE)
-    async def steam_updates_on_friend_message(self, event: AstrMessageEvent):
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    async def steam_updates_on_private_message(self, event: AstrMessageEvent):
         async for result in self._steam_updates_on_message(event):
             yield result
 
