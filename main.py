@@ -2483,6 +2483,9 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
     @staticmethod
     def _gid_from_feed(link: str, title: str, ts: int) -> str:
         link = (link or "").strip()
+        official_gid = SteamUpdatePush._official_announcement_gid(link)
+        if official_gid:
+            return official_gid
         match = re.search(r"/view/(\d+)", link)
         if match:
             return match.group(1)
@@ -2490,7 +2493,25 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
 
     @staticmethod
+    def _official_announcement_gid(url: str) -> str:
+        try:
+            parsed = urlparse(str(url or ""))
+        except ValueError:
+            return ""
+        if parsed.hostname not in {"steamstore-a.akamaihd.net", "store.steampowered.com"}:
+            return ""
+        match = re.fullmatch(
+            r"/news/externalpost/steam_community_announcements/(\d+)/?",
+            parsed.path,
+        )
+        return match.group(1) if match else ""
+
+    @staticmethod
     def _is_external_news(url: str, is_external_url: bool = False) -> bool:
+        # Steam's own announcement redirects are also marked external by the
+        # News API. Keep those while continuing to exclude third-party feeds.
+        if SteamUpdatePush._official_announcement_gid(url):
+            return False
         if is_external_url:
             return True
         path = urlparse(str(url or "")).path.lower().rstrip("/")
