@@ -12,7 +12,7 @@ import re
 import time
 import uuid
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -46,12 +46,22 @@ STEAM_NEWS_API = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/"
 STEAM_NEWS_FEED_API = "https://store.steampowered.com/feeds/news/app/{appid}/"
 FREE_GAMES_API = "https://www.gamerpower.com/api/giveaways?platform=steam&type=game"
 STEAM_WORKSHOP_DETAILS_API = "/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+STEAM_REVERSE_PROXY_BASE = "https://steam-api.4oi.site"
+STEAMGRIDDB_REVERSE_PROXY_BASE = "https://steamgriddb.4oi.site"
+REVERSE_PROXY_HOSTS = {
+    "api.steampowered.com": STEAM_REVERSE_PROXY_BASE,
+    "store.steampowered.com": STEAM_REVERSE_PROXY_BASE,
+    "www.steamgriddb.com": STEAMGRIDDB_REVERSE_PROXY_BASE,
+    "steamgriddb.com": STEAMGRIDDB_REVERSE_PROXY_BASE,
+    "cdn2.steamgriddb.com": STEAMGRIDDB_REVERSE_PROXY_BASE,
+}
 STEAM_IMAGE_DOMAINS = {
     "steamcommunity.com",
     "steampowered.com",
     "steamstatic.com",
     "steamusercontent.com",
     "akamaihd.net",
+    "steamgriddb.com",
 }
 MAX_NEWS_IMAGE_BYTES = 4_000_000
 MAX_NEWS_IMAGE_PIXELS = 3_500_000
@@ -469,12 +479,27 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
 
     def _proxy_mode(self) -> str:
         mode = str(self._cfg("proxy_mode", "system")).strip().lower()
-        if mode not in {"off", "system", "custom"}:
+        if mode not in {"off", "system", "custom", "reverse"}:
             return "system"
         return mode
 
     def _proxy_url(self) -> str:
         return str(self._cfg("proxy_url", "")).strip()
+
+    def _route_reverse_proxy_url(self, url: str) -> str:
+        if self._proxy_mode() != "reverse":
+            return url
+        try:
+            parsed = urlparse(str(url or ""))
+        except ValueError:
+            return url
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return url
+        proxy_base = REVERSE_PROXY_HOSTS.get((parsed.hostname or "").lower())
+        if not proxy_base:
+            return url
+        proxy = urlparse(proxy_base)
+        return urlunparse(parsed._replace(scheme=proxy.scheme, netloc=proxy.netloc))
 
     @staticmethod
     def _mask_proxy_url(url: str) -> str:
@@ -492,7 +517,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         )
         mode = self._proxy_mode()
 
-        if mode == "off":
+        if mode in {"off", "reverse"}:
             self._log_debug("network", "client init", proxy_mode=mode, trust_env=False)
             return httpx.AsyncClient(timeout=timeout, limits=limits, trust_env=False)
 
@@ -553,13 +578,53 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
     def _is_retryable_network_error(exc: Exception) -> bool:
         return isinstance(exc, httpx.RequestError | httpx.TimeoutException)
 
+    @staticmethod
+    def _is_retryable_reverse_proxy_status(status_code: int) -> bool:
+        return status_code in {429, 502, 503, 504}
+
     async def _request_with_network_fallback(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         await self._ensure_http_client()
         if self._client is None:
             raise RuntimeError("http client not ready")
+        request_url = self._route_reverse_proxy_url(url)
+
+        if (
+            self._proxy_mode() == "reverse"
+            and request_url != url
+            and method.upper() == "GET"
+        ):
+            for attempt in range(2):
+                try:
+                    response = await self._client.request(method, request_url, **kwargs)
+                except Exception as exc:
+                    if attempt > 0 or not self._is_retryable_network_error(exc):
+                        raise
+                    self._log_warn(
+                        "network",
+                        "reverse proxy request failed; retrying once",
+                        method=method.upper(),
+                        error=self._exc_text(exc),
+                    )
+                else:
+                    if (
+                        attempt > 0
+                        or not self._is_retryable_reverse_proxy_status(
+                            response.status_code
+                        )
+                    ):
+                        return response
+                    self._log_warn(
+                        "network",
+                        "reverse proxy returned a transient status; retrying once",
+                        method=method.upper(),
+                        status=response.status_code,
+                    )
+                    await response.aclose()
+
+                await asyncio.sleep(0.5)
 
         try:
-            return await self._client.request(method, url, **kwargs)
+            return await self._client.request(method, request_url, **kwargs)
         except Exception as exc:
             if not isinstance(exc, Exception) or not self._is_retryable_network_error(exc):
                 raise
@@ -570,7 +635,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
             if mode == "custom":
                 # Custom proxy may be unavailable; retry direct once.
                 fallback_kind = "direct"
-            else:
+            elif mode in {"off", "system"}:
                 # If user filled proxy_url but mode is not custom, retry once with proxy URL.
                 proxy_url = self._proxy_url()
                 if proxy_url:
@@ -597,7 +662,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
                 limits=fallback_limits,
                 **fallback_kwargs,
             ) as client:
-                return await client.request(method, url, **kwargs)
+                return await client.request(method, request_url, **kwargs)
 
     def _next_trace_id(self, prefix: str) -> str:
         self._trace_seq = (self._trace_seq + 1) % 1_000_000
@@ -2483,6 +2548,9 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
     @staticmethod
     def _gid_from_feed(link: str, title: str, ts: int) -> str:
         link = (link or "").strip()
+        official_gid = SteamUpdatePush._official_announcement_gid(link)
+        if official_gid:
+            return official_gid
         match = re.search(r"/view/(\d+)", link)
         if match:
             return match.group(1)
@@ -2490,7 +2558,25 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
 
     @staticmethod
+    def _official_announcement_gid(url: str) -> str:
+        try:
+            parsed = urlparse(str(url or ""))
+        except ValueError:
+            return ""
+        if parsed.hostname not in {"steamstore-a.akamaihd.net", "store.steampowered.com"}:
+            return ""
+        match = re.fullmatch(
+            r"/news/externalpost/steam_community_announcements/(\d+)/?",
+            parsed.path,
+        )
+        return match.group(1) if match else ""
+
+    @staticmethod
     def _is_external_news(url: str, is_external_url: bool = False) -> bool:
+        # Steam's own announcement redirects are also marked external by the
+        # News API. Keep those while continuing to exclude third-party feeds.
+        if SteamUpdatePush._official_announcement_gid(url):
+            return False
         if is_external_url:
             return True
         path = urlparse(str(url or "")).path.lower().rstrip("/")
@@ -4401,7 +4487,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
                 self._debug(f"read image cache failed: {url} {exc}")
         try:
             resp = await self._client.get(
-                url,
+                self._route_reverse_proxy_url(url),
                 timeout=self._news_image_timeout_sec(),
                 follow_redirects=True,
             )
@@ -4549,7 +4635,10 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         max_bytes = 6_000_000
         for url in candidates:
             try:
-                resp = await self._client.get(url, timeout=self._header_download_timeout_sec())
+                resp = await self._client.get(
+                    self._route_reverse_proxy_url(url),
+                    timeout=self._header_download_timeout_sec(),
+                )
                 resp.raise_for_status()
                 if resp.headers.get("Content-Length"):
                     if int(resp.headers["Content-Length"]) > max_bytes:

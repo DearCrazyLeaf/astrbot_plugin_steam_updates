@@ -44,7 +44,7 @@
 - **手动查询**：群内指令触发即时查询
 - **LLM整理**：可选用大模型同时翻译公告标题并整理正文，不增加额外模型请求
 - **逐条公告配图**（[@RhoninSeiei](https://github.com/RhoninSeiei)）：优先显示每条公告正文中的首张有效图片，失败时自动尝试后续候选并回退游戏头图
-- **自动过滤已标记的外部文章**：排除 News API 标记为 `is_external_url` 的新闻，以及 Feed 链接路径含 `externalpost` 的文章
+- **过滤第三方媒体文章**：保留 Steam 官方公告跳转链接，即使 API 标记为 `is_external_url`；继续排除第三方媒体的外部文章
 - **卡片/文本**：两种输出模式可选
 - **无更新静默**：当天无更新不推送
 - **限时免费领取活动**（[@RhoninSeiei](https://github.com/RhoninSeiei)）：支持将当前仍可领取的 Steam 游戏作为独立分区“限时免费领取”并入游戏更新推送
@@ -109,7 +109,7 @@ AstrBot WebUI -> 插件 -> 插件配置
 | free_games_enable | 是否启用限时免费领取活动 |
 | free_games_manual_only_when_no_news | 手动查询在没有普通游戏更新时，是否仅返回“限时免费领取”分区 |
 | display_timezone | 免费领取截止时间显示时区；留空跟随容器系统时区，填写 IANA 时区名时按 UTC 活动源时间转换显示 |
-| proxy_mode | 代理模式：`off` / `system` / `custom` |
+| proxy_mode | 代理模式：`off` / `system` / `custom` / `reverse` |
 | proxy_url | 自定义代理地址（仅 `custom` 生效） |
 | steam_appids | AppID 列表（如 `730`） |
 | workshop_enable | 是否启用创意工坊订阅监控 |
@@ -156,14 +156,22 @@ AstrBot WebUI -> 插件 -> 插件配置
 
 ### 🌐 代理说明
 
-- `proxy_mode=system`：读取 AstrBot 进程环境变量（如 `HTTP_PROXY` / `HTTPS_PROXY`）
-- `proxy_mode=custom`：使用 `proxy_url` 强制指定代理（推荐，最可控）
+- `proxy_mode=system`：正向代理，读取 AstrBot 进程环境变量（如 `HTTP_PROXY` / `HTTPS_PROXY`）
+- `proxy_mode=custom`：正向代理，使用 `proxy_url` 强制指定代理（例如 `http://127.0.0.1:7890`）
+- `proxy_mode=reverse`：反向代理，插件按目标域名改写请求地址，无需本机运行代理软件：
+  - Steam Web API 与商店请求使用 `https://steam-api.4oi.site`
+  - SteamGridDB API 与图片 CDN 请求使用 `https://steamgriddb.4oi.site`
 - `proxy_mode=off`：不使用代理，直连请求
 
+> [!NOTE]
+> 正向模式通过代理转发原目标请求；反向模式则把请求的目标主机替换为插件内置的反代服务地址，同时保留原请求路径、查询参数和请求方法；此模式假定反代服务已按这些路径配置好对应上游，切换模式后会在下一次网络请求时重建 HTTP 客户端。反向代理 GET 请求遇到连接/超时错误或 429、502、503、504 时，会在 0.5 秒后重试一次；不会自动切换为直连或其他代理。
+
 建议：
-- 若创意工坊查询出现 `ConnectTimeout/ReadTimeout`，优先改为 `custom` 并设置 `proxy_url`（例如 `http://127.0.0.1:7890`）
+- 没有代理软件，或本地正向代理不稳定时，可尝试 `reverse`
+- 若使用本地代理软件，优先选择 `custom` 并设置 `proxy_url`；也可选择 `system` 并配置 AstrBot 进程的代理环境变量
 - 创意工坊不仅依赖 `api.steampowered.com`，还依赖 `steamcommunity.com`
-- 仅代理 API 而不代理社区域名时，常见现象是：游戏更新可用、创意工坊失败
+- 内置反代目前覆盖 Steam Web API/商店和 SteamGridDB 域名，不覆盖 `steamcommunity.com` 或 Steam 图片 CDN；相关请求在反代模式下仍按原地址访问
+- 当前插件尚未集成 SteamGridDB 数据源，因此 SteamGridDB 反代只会在插件发起 SteamGridDB 域名请求时生效，不会改变现有 Steam CDN 头图和公告配图来源
 
 ## 🗂️ AppID 名称映射 | AppID Name Map
 
