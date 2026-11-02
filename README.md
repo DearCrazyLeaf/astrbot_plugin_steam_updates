@@ -1,9 +1,9 @@
 # ✨ Steam 游戏/创意工坊更新推送 | Steam Update Push (AstrBot Plugin)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![AstrBot](https://img.shields.io/badge/AstrBot-v4.12%2B-brightgreen)
+![AstrBot](https://img.shields.io/badge/AstrBot-v4.29.3%2B-brightgreen)
 ![License](https://img.shields.io/badge/License-GPL--3.0-orange)
-![views](https://count.getloli.com/get/@astrbotchuanhuatong?theme=booru-jaypee)
+![views](https://count.getloli.com/get/@astrbot_plugin_steam_updates?theme=booru-jaypee)
 
 ## ✅ 简介 | Introduction
 
@@ -42,6 +42,8 @@
 - **多平台推送**（[@RhoninSeiei](https://github.com/RhoninSeiei)）：支持使用 UMO 配置多个平台、多个同类型适配器实例、群聊、私聊和其他会话
 - **分会话配置**（[@RhoninSeiei](https://github.com/RhoninSeiei)）：支持分群聊/会话单独配置订阅内容和推送
 - **手动查询**：群内指令触发即时查询
+- **插件独立 WebUI**：主页展示轮询、订阅和近 7 天免费游戏日历；配置页维护插件设置、AppID 名称覆盖和封面缓存
+- **免费游戏历史查询**：在群聊中使用可配置指令查看已记录的近 7 天免费游戏，不会为查询额外访问网络
 - **LLM整理**：可选用大模型同时翻译公告标题并整理正文，不增加额外模型请求
 - **逐条公告配图**（[@RhoninSeiei](https://github.com/RhoninSeiei)）：优先显示每条公告正文中的首张有效图片，失败时自动尝试后续候选并回退游戏头图
 - **过滤第三方媒体文章**：保留 Steam 官方公告跳转链接，即使 API 标记为 `is_external_url`；继续排除第三方媒体的外部文章
@@ -89,6 +91,12 @@ AstrBot/data/plugins/astrbot_plugin_steam_updates
 
 重启 AstrBot 后即可在 WebUI 中看到插件
 
+### 插件独立 WebUI
+
+进入 **AstrBot WebUI → 插件 → 插件管理 → Steam Updates → 插件页面**，可查看运行概览、全局及分会话订阅、免费游戏日历，并在配置页修改插件设置、维护 AppID 名称覆盖或清理封面缓存。保存插件配置需要 AstrBot `4.29.3` 或更高版本。
+
+免费游戏日历基于插件运行期间成功获取的数据逐日记录，不会补录启用前的历史；查询失败会与“当天没有活动”区分显示。群聊近 7 天记录查询指令可在“手动查询指令”配置组中修改，默认是 `免费游戏近7天`。
+
 ## ⚙️ 配置 | Configuration
 
 插件使用 `_conf_schema.json` 定义配置，入口：
@@ -126,6 +134,7 @@ AstrBot WebUI -> 插件 -> 插件配置
 | message_mode | `card` 或 `text` |
 | manual_query_game_command | 游戏更新手动查询指令（可配置多个） |
 | manual_query_workshop_command | 创意工坊手动查询指令（可配置多个） |
+| manual_query_free_games_history_command | 近 7 天免费游戏记录查询指令（可配置多个，默认 `免费游戏近7天`） |
 | content_process_mode | 内容处理方式：`plugin` / `llm` |
 | llm_provider_id | LLM 提供商ID（可选，WebUI下拉选择） |
 | llm_timeout_sec | LLM 请求超时秒数（默认 `30`，范围 `5-30`，超时后回退到插件内置处理） |

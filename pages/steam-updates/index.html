@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Steam Updates</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">S</div>
+          <div><strong>STEAM UPDATES</strong><small>插件控制台</small></div>
+        </div>
+        <nav aria-label="页面导航">
+          <button class="nav-item active" data-page="home">概览主页</button>
+          <button class="nav-item" data-page="settings">插件配置</button>
+        </nav>
+        <div class="sidebar-note">AstrBot 插件扩展页</div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">ASTRBOT · STEAM UPDATES</p>
+            <h1 id="page-title">运行概览</h1>
+          </div>
+          <div id="status-pill" class="status-pill">正在加载</div>
+        </header>
+        <div id="message" class="message" role="status" aria-live="polite"></div>
+        <section id="home-page" class="page-section">
+          <div id="hero" class="hero panel">
+            <div class="hero-copy">
+              <div class="hero-kicker"><span class="live-dot"></span><span id="hero-mode">COMMUNITY SIGNAL · LIVE MONITOR</span></div>
+              <p class="eyebrow">STEAM NEWS & COMMUNITY</p>
+              <h2>游戏动态，尽在掌握。</h2>
+              <p id="hero-caption" class="muted">订阅概况、轮询状态与限时免费游戏，一览即知。</p>
+              <div class="hero-highlights">
+                <span><i class="highlight-mark news-mark"></i>游戏公告</span>
+                <span><i class="highlight-mark workshop-mark"></i>创意工坊</span>
+                <span><i class="highlight-mark free-mark"></i>限时免费</span>
+              </div>
+            </div>
+            <div class="hero-art" aria-hidden="true">
+              <div class="art-orbit orbit-outer"></div>
+              <div class="art-orbit orbit-inner"></div>
+              <div class="art-core"><span>STEAM</span><strong>UPDATES</strong></div>
+              <div class="art-signal signal-one"></div>
+              <div class="art-signal signal-two"></div>
+              <div class="art-signal signal-three"></div>
+              <div class="art-label art-label-top"><span>MONITORING</span><strong>游戏动态</strong></div>
+              <div class="art-label art-label-bottom"><span>7-DAY TRACKER</span><strong>免费游戏日历</strong></div>
+            </div>
+            <button class="primary hero-action" data-open-settings>
+              <span>管理插件配置</span><span class="button-arrow" aria-hidden="true">→</span>
+            </button>
+          </div>
+          <div id="metric-grid" class="metric-grid"></div>
+          <section class="panel">
+            <div class="section-heading">
+              <div><p class="eyebrow">YOUR SUBSCRIPTION NETWORK</p><h2>订阅网络</h2></div>
+              <span id="session-summary" class="section-counter"></span>
+            </div>
+            <div id="subscription-overview" class="subscription-overview"></div>
+            <div id="sessions" class="session-list"></div>
+          </section>
+          <section class="panel">
+            <div class="section-heading">
+              <div><p class="eyebrow">FREE GAME TRACKER</p><h2>近 7 天免费游戏</h2></div>
+              <span id="calendar-range" class="section-counter">最近 7 天</span>
+            </div>
+            <p id="calendar-notice" class="muted"></p>
+            <div id="calendar" class="calendar"></div>
+          </section>
+          <section class="panel">
+            <div class="section-heading">
+              <div><p class="eyebrow">AUTOMATION STATUS</p><h2>自动巡检</h2></div>
+              <span id="polling-badge" class="polling-badge">等待连接</span>
+            </div>
+            <div id="polling-track" class="polling-track" aria-hidden="true"></div>
+            <div id="runtime" class="runtime-grid"></div>
+          </section>
+        </section>
+        <section id="settings-page" class="page-section hidden">
+          <div class="panel settings-intro">
+            <div>
+              <p class="eyebrow">PLUGIN SETTINGS</p>
+              <h2>配置与游戏资料</h2>
+              <p class="muted">修改设置后保存；秘密字段不会从服务器回传。</p>
+            </div>
+            <div class="button-row">
+              <button id="reload-settings" class="secondary">重新载入</button>
+              <button id="save-settings" class="primary">保存更改</button>
+            </div>
+          </div>
+          <div id="settings-groups" class="settings-groups"></div>
+          <section class="panel">
+            <div class="section-heading">
+              <div><p class="eyebrow">GAME LIBRARY</p><h2>游戏名称与翻译</h2></div>
+            </div>
+            <p class="muted">手工名称覆盖自动获取结果；删除覆盖后会恢复自动获取/内置名称。</p>
+            <form id="game-form" class="game-form">
+              <label>AppID<input name="appid" inputmode="numeric" pattern="[0-9]+" required maxlength="12" /></label>
+              <label>语言代码<input name="language" required maxlength="20" placeholder="schinese" /></label>
+              <label class="game-name-field">名称/翻译<input name="name" required maxlength="120" /></label>
+              <button class="primary" type="submit">保存名称</button>
+            </form>
+            <div id="games-list" class="games-list"></div>
+          </section>
+          <section class="panel">
+            <div class="section-heading">
+              <div><p class="eyebrow">CACHED ARTWORK</p><h2>封面缓存</h2></div>
+              <button id="reload-covers" class="secondary">刷新列表</button>
+            </div>
+            <p class="muted">这里只显示已缓存的游戏头图。删除缓存不会删除游戏名称或订阅。</p>
+            <div id="covers-list" class="covers-list"></div>
+          </section>
+        </section>
+        <footer>Steam-inspired interface · 本地插件数据</footer>
+      </main>
+    </div>
+  </body>
+</html>

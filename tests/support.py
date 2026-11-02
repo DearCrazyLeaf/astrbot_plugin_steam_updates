@@ -112,6 +112,23 @@ def _install_stub_modules() -> None:
     astrbot_api_mod = types.ModuleType("astrbot.api")
     astrbot_api_mod.logger = _Logger()
 
+    class _Request:
+        payload = {}
+
+        @classmethod
+        async def json(cls, default=None):
+            return cls.payload if cls.payload is not None else default
+
+    def _json_response(payload, status_code=200):
+        return {"status_code": status_code, "payload": payload}
+
+    def _error_response(message, status_code=400):
+        return {"status_code": status_code, "error": message}
+
+    astrbot_api_web_mod = types.ModuleType("astrbot.api.web")
+    astrbot_api_web_mod.request = _Request
+    astrbot_api_web_mod.json_response = _json_response
+    astrbot_api_web_mod.error_response = _error_response
     astrbot_api_event_mod = types.ModuleType("astrbot.api.event")
     astrbot_api_event_mod.filter = filter_obj
 
@@ -165,6 +182,7 @@ def _install_stub_modules() -> None:
 
     sys.modules["astrbot"] = astrbot_mod
     sys.modules["astrbot.api"] = astrbot_api_mod
+    sys.modules["astrbot.api.web"] = astrbot_api_web_mod
     sys.modules["astrbot.api.event"] = astrbot_api_event_mod
     sys.modules["astrbot.api.star"] = astrbot_api_star_mod
     sys.modules["astrbot.core.config.astrbot_config"] = astrbot_core_config_mod

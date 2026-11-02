@@ -288,6 +288,17 @@
         "items": {
           "type": "string"
         }
+      },
+      "manual_query_free_games_history_command": {
+        "description": "近7天免费游戏记录查询指令（可配置多个）",
+        "type": "list",
+        "default": [
+          "免费游戏近7天"
+        ],
+        "hint": "群内发送任一指令可查询本地记录的近7天免费游戏，不会额外请求网络",
+        "items": {
+          "type": "string"
+        }
       }
     }
   },

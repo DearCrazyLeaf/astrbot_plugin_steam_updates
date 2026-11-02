@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback
@@ -144,6 +145,8 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         self._app_header_dir.mkdir(parents=True, exist_ok=True)
         self._news_image_dir = self._data_dir / "news_images"
         self._news_image_dir.mkdir(parents=True, exist_ok=True)
+        self._free_games_history_path = self._data_dir / "free_games_history.json"
+        self._manual_appid_name_map_path = self._data_dir / "manual_appid_name_map.json"
 
         self._client: httpx.AsyncClient | None = None
         self._client_signature: str = ""
@@ -154,6 +157,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         self._last_platform_id: str | None = None
         self._last_bot: Any | None = None
         self._appid_name_map: dict[str, Any] | None = None
+        self._auto_appid_name_map: dict[str, Any] | None = None
         self._name_cache: dict[str, Any] | None = None
         self._name_cache_path = self._data_dir / "app_name_cache.json"
         self._llm_cache_path = self._data_dir / "llm_result_cache.json"
@@ -170,6 +174,18 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         self._poll_lock_owner = False
         self._poll_instance_path = self._data_dir / ".poll.instance"
         self._poll_instance_token = ""
+        self._webui_poll_state: dict[str, Any] = {
+            "status": "waiting",
+            "last_started": None,
+            "last_finished": None,
+            "last_error": "",
+            "next_run": None,
+        }
+        if context is not None:
+            from .webui import SteamUpdatesWebUI
+
+            self._webui = SteamUpdatesWebUI(self)
+            self._webui.register()
 
     # --- lifecycle ---
     async def initialize(self):
@@ -957,6 +973,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
                 break
             now = datetime.now().astimezone()
             next_run = self._next_poll_time(now)
+            self._webui_poll_state["next_run"] = next_run.isoformat()
             wait_sec = max(0, (next_run - now).total_seconds())
             self._log_debug("poll", "next schedule", now=now.isoformat(), next=next_run.isoformat(), wait_sec=int(wait_sec))
             try:
@@ -973,8 +990,22 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
                 self._log_debug("poll", "skip: lock held by another instance")
                 continue
             try:
+                self._webui_poll_state.update(
+                    status="running",
+                    last_started=datetime.now().astimezone().isoformat(),
+                    last_error="",
+                )
                 await self._poll_once()
+                self._webui_poll_state.update(
+                    status="success",
+                    last_finished=datetime.now().astimezone().isoformat(),
+                )
             except Exception:
+                self._webui_poll_state.update(
+                    status="failed",
+                    last_finished=datetime.now().astimezone().isoformat(),
+                    last_error="最近一次轮询发生错误，请查看插件日志。",
+                )
                 logger.exception("[steam_updates][poll] loop execution failed")
 
 
@@ -1317,6 +1348,10 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         raw = self._cfg("manual_query_workshop_command", ["\u521b\u610f\u5de5\u574a\u66f4\u65b0"])
         return self._normalize_manual_commands(raw, ["\u521b\u610f\u5de5\u574a\u66f4\u65b0"])
 
+    def _manual_free_games_history_commands(self) -> list[str]:
+        raw = self._cfg("manual_query_free_games_history_command", ["免费游戏近7天"])
+        return self._normalize_manual_commands(raw, ["免费游戏近7天"])
+
     @staticmethod
     def _normalize_manual_command_text(text: str) -> str:
         clean = str(text or "").strip()
@@ -1503,6 +1538,137 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
 
     def _free_games_display_timezone_name(self) -> str:
         return str(self._cfg("display_timezone", "")).strip()
+
+    def _free_games_local_date(self):
+        return datetime.now(self._get_display_timezone()).date()
+
+    def _load_free_games_history(self) -> dict[str, Any]:
+        path = self._free_games_history_path
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self._log_warn("free_games", "history load failed", error=exc)
+            return {}
+        days = data.get("days") if isinstance(data, dict) else None
+        return days if isinstance(days, dict) else {}
+
+    def _save_free_games_observation(
+        self,
+        items: list[NewsItem] | None,
+    ) -> None:
+        today = self._free_games_local_date()
+        date_key = today.isoformat()
+        days = self._load_free_games_history()
+        existing = days.get(date_key)
+        if items is None:
+            if isinstance(existing, dict) and existing.get("status") == "success":
+                return
+            days[date_key] = {
+                "status": "failed",
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "items": [],
+            }
+        else:
+            previous_items = (
+                existing.get("items", [])
+                if isinstance(existing, dict) and isinstance(existing.get("items"), list)
+                else []
+            )
+            by_gid: dict[str, dict[str, Any]] = {
+                str(item.get("gid") or ""): item
+                for item in previous_items
+                if isinstance(item, dict) and str(item.get("gid") or "")
+            }
+            for item in items:
+                gid = self._stable_news_gid(item)
+                by_gid[gid] = {
+                    "gid": gid,
+                    "title": item.title[:300],
+                    "url": item.url[:2000],
+                    "contents": item.contents[:3000],
+                    "date": int(item.date or 0),
+                    "appid": str(item.appid or "")[:20],
+                }
+            days[date_key] = {
+                "status": "success",
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "items": list(by_gid.values())[:100],
+            }
+
+        oldest = (today - timedelta(days=6)).isoformat()
+        days = {
+            key: value
+            for key, value in days.items()
+            if isinstance(key, str) and key >= oldest and key <= date_key
+        }
+        path = self._free_games_history_path
+        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_text(
+                json.dumps({"days": days}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temp_path.replace(path)
+        except OSError as exc:
+            self._log_warn("free_games", "history save failed", error=exc)
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _get_free_games_calendar(self) -> list[dict[str, Any]]:
+        today = self._free_games_local_date()
+        records = self._load_free_games_history()
+        result: list[dict[str, Any]] = []
+        for offset in range(6, -1, -1):
+            date_key = (today - timedelta(days=offset)).isoformat()
+            record = records.get(date_key)
+            if not isinstance(record, dict):
+                result.append({"date": date_key, "status": "unknown", "items": []})
+                continue
+            status = record.get("status")
+            result.append(
+                {
+                    "date": date_key,
+                    "status": status if status in {"success", "failed"} else "unknown",
+                    "observed_at": record.get("observed_at"),
+                    "items": record.get("items", [])
+                    if isinstance(record.get("items"), list)
+                    else [],
+                }
+            )
+        return result
+
+    def _format_free_games_history_message(self) -> str:
+        if not self._free_games_enabled():
+            notice = "免费游戏采集已关闭，已有记录可能不完整。\n"
+        else:
+            notice = ""
+        calendar = self._get_free_games_calendar()
+        lines = [notice + "近7天限时免费游戏记录（按展示时区）"]
+        for day in calendar:
+            lines.append(f"\n{day['date']}")
+            if day["status"] == "failed":
+                lines.append("查询失败，无法确认")
+            elif day["status"] == "unknown":
+                lines.append("暂无记录")
+            elif not day["items"]:
+                lines.append("当天未发现限时免费游戏")
+            else:
+                for item in day["items"]:
+                    title = str(item.get("title") or "未知游戏").strip()
+                    contents = str(item.get("contents") or "").strip()
+                    url = str(item.get("url") or "").strip()
+                    lines.append(title)
+                    if contents:
+                        lines.append(contents)
+                    if url:
+                        lines.append(url)
+        message = "\n".join(lines)
+        return message if len(message) <= 3800 else message[:3780].rstrip() + "\n…内容过长，已截断"
 
     @staticmethod
     def _system_tzinfo():
@@ -1844,14 +2010,17 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
             resp.raise_for_status()
             payload = resp.json()
         except Exception as exc:
+            self._save_free_games_observation(None)
             self._log_warn("free_games", "request failed", error=self._exc_text(exc))
             return None
         if isinstance(payload, dict):
             if self._is_no_active_free_games_payload(payload):
+                self._save_free_games_observation([])
                 return []
             payload = self._extract_free_games_payload_list(payload)
 
         if not isinstance(payload, list):
+            self._save_free_games_observation(None)
             self._log_warn("free_games", "unexpected payload", payload_type=type(payload).__name__)
             return None
 
@@ -1860,6 +2029,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
             if isinstance(entry, dict) and self._is_free_game_active(entry)
         ]
         if not active_entries:
+            self._save_free_games_observation([])
             return []
 
         open_urls: list[str] = []
@@ -1916,6 +2086,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
         ]
         items = self._normalize_news_items(items)
         items.sort(key=lambda item: (item.date, item.title), reverse=True)
+        self._save_free_games_observation(items)
         return items
 
     @staticmethod
@@ -2793,6 +2964,21 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
     def _bundled_appid_map_path(self) -> Path:
         return Path(__file__).with_name("appid_map.json")
 
+    def _load_manual_appid_name_map(self) -> dict[str, Any]:
+        path = self._manual_appid_name_map_path
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self._debug(f"load manual appid map failed: {exc}")
+            return {}
+        return (
+            {str(key): value for key, value in data.items()}
+            if isinstance(data, dict)
+            else {}
+        )
+
     def _load_appid_name_map(self) -> dict[str, Any]:
         if self._appid_name_map is not None:
             return self._appid_name_map
@@ -2829,17 +3015,24 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
                 merged_map[appid] = {**cached_value, **bundled_value}
             else:
                 merged_map[appid] = bundled_value
+        self._auto_appid_name_map = deepcopy(merged_map)
+        for appid, manual_value in self._load_manual_appid_name_map().items():
+            automatic_value = merged_map.get(appid)
+            if isinstance(manual_value, dict) and isinstance(automatic_value, dict):
+                merged_map[appid] = {**automatic_value, **manual_value}
+            else:
+                merged_map[appid] = manual_value
         self._appid_name_map = merged_map
         return self._appid_name_map
 
     def _save_appid_name_map(self) -> None:
-        if self._appid_name_map is None:
+        if self._auto_appid_name_map is None:
             return
         try:
             path = self._appid_map_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps(self._appid_name_map, ensure_ascii=False, indent=2),
+                json.dumps(self._auto_appid_name_map, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception as exc:
@@ -2960,6 +3153,18 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
                     else:
                         current = {str(lang): name}
                     appid_map[str(appid)] = current
+                    if self._auto_appid_name_map is None:
+                        self._auto_appid_name_map = {}
+                    automatic = self._auto_appid_name_map.get(str(appid))
+                    if isinstance(automatic, dict):
+                        automatic[str(lang)] = name
+                    elif automatic:
+                        self._auto_appid_name_map[str(appid)] = {
+                            "default": str(automatic),
+                            str(lang): name,
+                        }
+                    else:
+                        self._auto_appid_name_map[str(appid)] = {str(lang): name}
                     self._save_appid_name_map()
                 return name
             except asyncio.CancelledError:
@@ -5029,14 +5234,19 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
     async def _steam_updates_on_message(self, event: AstrMessageEvent):
         game_commands = self._manual_game_query_commands()
         workshop_commands = self._manual_workshop_query_commands()
+        free_games_history_commands = self._manual_free_games_history_commands()
         text = self._normalize_manual_command_text(self._get_event_text(event))
         if not text:
             return
         is_game_cmd = self._match_command(text, game_commands)
         is_workshop_cmd = self._match_command(text, workshop_commands)
-        if not is_game_cmd and not is_workshop_cmd:
+        is_free_games_history_cmd = self._match_command(text, free_games_history_commands)
+        if not is_game_cmd and not is_workshop_cmd and not is_free_games_history_cmd:
             return
-        query_kind = "game" if is_game_cmd and not is_workshop_cmd else "workshop"
+        if is_free_games_history_cmd and not is_game_cmd and not is_workshop_cmd:
+            query_kind = "free_games_history"
+        else:
+            query_kind = "game" if is_game_cmd and not is_workshop_cmd else "workshop"
         if is_game_cmd and is_workshop_cmd:
             query_kind = "game"
             self._log_warn(
@@ -5073,6 +5283,9 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
             return
 
         event_umo = str(event.unified_msg_origin or "").strip()
+        if query_kind == "free_games_history" and not group_id:
+            yield event.plain_result("近7天免费游戏记录仅支持群聊查询")
+            return
         if not self._manual_query_allowed(event_umo):
             self._log_warn(
                 "manual_cmd",
@@ -5083,6 +5296,9 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
             yield event.plain_result("当前会话未启用插件")
             return
 
+        if query_kind == "free_games_history":
+            yield event.plain_result(self._format_free_games_history_message())
+            return
         if query_kind == "workshop":
             yield event.plain_result("\u6b63\u5728\u67e5\u8be2\u521b\u610f\u5de5\u574a\u66f4\u65b0\uff0c\u8bf7\u7a0d\u540e...")
         else:
