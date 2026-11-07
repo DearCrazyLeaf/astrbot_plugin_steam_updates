@@ -335,13 +335,25 @@
           "custom",
           "reverse"
         ],
-        "hint": "off=直连；system=使用系统环境变量正向代理；custom=使用下方地址正向代理；reverse=使用插件内置反向代理（Steam API/商店：https://steam-api.4oi.site；SteamGridDB：https://steamgriddb.4oi.site）"
+        "hint": "off=直连；system=使用系统环境变量正向代理；custom=使用下方地址正向代理；reverse=使用插件内置反向代理（API/商店与 SteamGridDB 地址可在下方分别配置）"
       },
       "proxy_url": {
         "description": "自定义代理地址",
         "type": "string",
         "default": "",
-        "hint": "示例：http://127.0.0.1:7890 或 socks5://127.0.0.1:7890（仅 proxy_mode=custom 生效；反向代理地址见代理模式说明）"
+        "hint": "示例：http://127.0.0.1:7890 或 socks5://127.0.0.1:7890（仅 proxy_mode=custom 生效；反向代理地址见下方两项）"
+      },
+      "reverse_proxy_api_base": {
+        "description": "反向代理 API 基础地址",
+        "type": "string",
+        "default": "https://community.steam-api.com",
+        "hint": "proxy_mode=reverse 时，api.steampowered.com 与 store.steampowered.com 请求会被重写至此地址；留空则不重写"
+      },
+      "reverse_proxy_steamgriddb_base": {
+        "description": "反向代理 SteamGridDB 基础地址",
+        "type": "string",
+        "default": "",
+        "hint": "proxy_mode=reverse 时，steamgriddb.com 及 cdn2.steamgriddb.com 请求会被重写至此地址"
       }
     }
   },

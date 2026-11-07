@@ -168,8 +168,8 @@ AstrBot WebUI -> 插件 -> 插件配置
 - `proxy_mode=system`：正向代理，读取 AstrBot 进程环境变量（如 `HTTP_PROXY` / `HTTPS_PROXY`）
 - `proxy_mode=custom`：正向代理，使用 `proxy_url` 强制指定代理（例如 `http://127.0.0.1:7890`）
 - `proxy_mode=reverse`：反向代理，插件按目标域名改写请求地址，无需本机运行代理软件：
-  - Steam Web API 与商店请求使用 `https://steam-api.4oi.site`
-  - SteamGridDB API 与图片 CDN 请求使用 `https://steamgriddb.4oi.site`
+  - Steam Web API 与商店请求使用 `reverse_proxy_api_base`（默认 `https://community.steam-api.com`）
+  - SteamGridDB API 与图片 CDN 请求使用 `reverse_proxy_steamgriddb_base`
 - `proxy_mode=off`：不使用代理，直连请求
 
 > [!NOTE]

@@ -2,6 +2,12 @@
 
 本文档记录 `astrbot_plugin_steam_updates` 的版本变更
 
+## v1.5.1
+
+## 优化
+- 修改默认的API反代地址为 `https://community.steam-api.com` 
+- 为反代地址提供可配置的入口（SteamGridDB默认不填写）
+
 ## v1.5.0
 
 ### 新增

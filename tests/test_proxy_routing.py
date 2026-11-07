@@ -16,22 +16,26 @@ class ReverseProxyRoutingTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.plugin = object.__new__(self.mod.SteamUpdatePush)
         self.mode = "reverse"
-        self.plugin._cfg = lambda key, default=None: (
-            self.mode if key == "proxy_mode" else default
-        )
+        self.api_base = "https://community.steam-api.com"
+        self.grid_base = ""
+        self.plugin._cfg = lambda key, default=None: {
+            "proxy_mode": self.mode,
+            "reverse_proxy_api_base": self.api_base,
+            "reverse_proxy_steamgriddb_base": self.grid_base,
+        }.get(key, default)
         self.plugin._client = AsyncMock()
         self.plugin._ensure_http_client = AsyncMock()
 
     def test_reverse_proxy_rewrites_only_supported_hosts_and_preserves_path_query(self):
         cases = {
             "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=730":
-                "https://steam-api.4oi.site/ISteamNews/GetNewsForApp/v2/?appid=730",
+                "https://community.steam-api.com/ISteamNews/GetNewsForApp/v2/?appid=730",
             "https://store.steampowered.com/feeds/news/app/730/?l=english":
-                "https://steam-api.4oi.site/feeds/news/app/730/?l=english",
+                "https://community.steam-api.com/feeds/news/app/730/?l=english",
             "https://www.steamgriddb.com/api/v2/search/123":
-                "https://steamgriddb.4oi.site/api/v2/search/123",
+                "https://www.steamgriddb.com/api/v2/search/123",
             "https://cdn2.steamgriddb.com/grid/abc.jpg":
-                "https://steamgriddb.4oi.site/grid/abc.jpg",
+                "https://cdn2.steamgriddb.com/grid/abc.jpg",
         }
 
         for source, expected in cases.items():
@@ -65,14 +69,14 @@ class ReverseProxyRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         self.plugin._client.request.assert_awaited_once_with(
             "GET",
-            "https://steam-api.4oi.site/ISteamNews/GetNewsForApp/v2/",
+            "https://community.steam-api.com/ISteamNews/GetNewsForApp/v2/",
             params={"appid": "730"},
         )
 
     async def test_reverse_proxy_retries_transient_network_error_once(self):
         request = httpx.Request(
             "GET",
-            "https://steam-api.4oi.site/ISteamNews/GetNewsForApp/v2/",
+            "https://community.steam-api.com/ISteamNews/GetNewsForApp/v2/",
         )
         expected = httpx.Response(200, request=request)
         self.plugin._client.request = AsyncMock(
@@ -95,7 +99,7 @@ class ReverseProxyRoutingTest(unittest.IsolatedAsyncioTestCase):
     async def test_reverse_proxy_retries_transient_status_once(self):
         request = httpx.Request(
             "GET",
-            "https://steam-api.4oi.site/ISteamNews/GetNewsForApp/v2/",
+            "https://community.steam-api.com/ISteamNews/GetNewsForApp/v2/",
         )
         transient = httpx.Response(503, request=request)
         expected = httpx.Response(200, request=request)
@@ -115,7 +119,7 @@ class ReverseProxyRoutingTest(unittest.IsolatedAsyncioTestCase):
     async def test_reverse_proxy_does_not_retry_non_transient_status(self):
         request = httpx.Request(
             "GET",
-            "https://steam-api.4oi.site/ISteamNews/GetNewsForApp/v2/",
+            "https://community.steam-api.com/ISteamNews/GetNewsForApp/v2/",
         )
         response = httpx.Response(404, request=request)
         self.plugin._client.request = AsyncMock(return_value=response)
@@ -133,7 +137,7 @@ class ReverseProxyRoutingTest(unittest.IsolatedAsyncioTestCase):
     async def test_reverse_proxy_does_not_retry_non_get_requests(self):
         request = httpx.Request(
             "POST",
-            "https://steam-api.4oi.site/ISteamNews/GetNewsForApp/v2/",
+            "https://community.steam-api.com/ISteamNews/GetNewsForApp/v2/",
         )
         self.plugin._client.request = AsyncMock(
             side_effect=httpx.ConnectError(
@@ -153,7 +157,7 @@ class ReverseProxyRoutingTest(unittest.IsolatedAsyncioTestCase):
     async def test_reverse_proxy_does_not_fall_back_to_forward_proxy_after_retry_exhausted(self):
         request = httpx.Request(
             "GET",
-            "https://steam-api.4oi.site/ISteamNews/GetNewsForApp/v2/",
+            "https://community.steam-api.com/ISteamNews/GetNewsForApp/v2/",
         )
         self.plugin._client.request = AsyncMock(
             side_effect=httpx.ConnectError("proxy unavailable", request=request)

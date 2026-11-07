@@ -47,15 +47,6 @@ STEAM_NEWS_API = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/"
 STEAM_NEWS_FEED_API = "https://store.steampowered.com/feeds/news/app/{appid}/"
 FREE_GAMES_API = "https://www.gamerpower.com/api/giveaways?platform=steam&type=game"
 STEAM_WORKSHOP_DETAILS_API = "/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
-STEAM_REVERSE_PROXY_BASE = "https://steam-api.4oi.site"
-STEAMGRIDDB_REVERSE_PROXY_BASE = "https://steamgriddb.4oi.site"
-REVERSE_PROXY_HOSTS = {
-    "api.steampowered.com": STEAM_REVERSE_PROXY_BASE,
-    "store.steampowered.com": STEAM_REVERSE_PROXY_BASE,
-    "www.steamgriddb.com": STEAMGRIDDB_REVERSE_PROXY_BASE,
-    "steamgriddb.com": STEAMGRIDDB_REVERSE_PROXY_BASE,
-    "cdn2.steamgriddb.com": STEAMGRIDDB_REVERSE_PROXY_BASE,
-}
 STEAM_IMAGE_DOMAINS = {
     "steamcommunity.com",
     "steampowered.com",
@@ -502,6 +493,19 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
     def _proxy_url(self) -> str:
         return str(self._cfg("proxy_url", "")).strip()
 
+    def _reverse_proxy_bases(self) -> dict[str, str]:
+        api_base = str(self._cfg("reverse_proxy_api_base", "")).strip()
+        grid_base = str(self._cfg("reverse_proxy_steamgriddb_base", "")).strip()
+        bases: dict[str, str] = {}
+        if api_base:
+            bases["api.steampowered.com"] = api_base
+            bases["store.steampowered.com"] = api_base
+        if grid_base:
+            bases["www.steamgriddb.com"] = grid_base
+            bases["steamgriddb.com"] = grid_base
+            bases["cdn2.steamgriddb.com"] = grid_base
+        return bases
+
     def _route_reverse_proxy_url(self, url: str) -> str:
         if self._proxy_mode() != "reverse":
             return url
@@ -511,7 +515,7 @@ class SteamUpdatePush(SubscriptionPollingMixin, SubscriptionMixin, Star):
             return url
         if parsed.scheme.lower() not in {"http", "https"}:
             return url
-        proxy_base = REVERSE_PROXY_HOSTS.get((parsed.hostname or "").lower())
+        proxy_base = self._reverse_proxy_bases().get((parsed.hostname or "").lower())
         if not proxy_base:
             return url
         proxy = urlparse(proxy_base)
